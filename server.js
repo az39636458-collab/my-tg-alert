@@ -1,5 +1,6 @@
 const Bitunix = require('./Bitunix');
 
+// 讓程式自己去 Railway 的保險箱拿鑰匙
 const bitunix = new Bitunix({
   apiKey: process.env.BITUNIX_API_KEY,
   apiSecret: process.env.BITUNIX_API_SECRET
@@ -61,7 +62,7 @@ async function startBot() {
                     const entryPriceMatch = messageText.match(/收盤價：([\d\.]+)/);
                     const stopLossMatch = messageText.match(/建議停損:([\d\.]+)/);
                     
-                    // 🌟 關鍵修改：現在改抓「建議停利一」
+                    // 🌟 現在改抓「建議停利一」
                     const takeProfit1Match = messageText.match(/建議停利一:([\d\.]+)/);
 
                     if (entryPriceMatch && stopLossMatch && takeProfit1Match) {
@@ -91,34 +92,5 @@ async function startBot() {
                         const margin = totalBalance * 0.05; // 嚴格風控：最多 5% 倉位
                         const totalQuantity = Math.floor((margin * leverage) / entryPrice);
                         
-                        // 🌟 關鍵修改：計算 80% 的停利數量
-                        const tp1Quantity = Math.floor(totalQuantity * 0.8);
-
-                        console.log(`🤖 作戰計畫: ${isShort ? '做空' : '做多'} ${coin} | 進場價: ${entryPrice}`);
-                        console.log(`📊 總數量: ${totalQuantity} | 停損設在: ${stopLoss} (全倉)`);
-                        console.log(`🎯 停利一目標: ${takeProfit1} | 到達時平倉數量: ${tp1Quantity} (80%倉位)`);
-
-                        const LIVE_TRADING = false; 
-
-                        if (LIVE_TRADING) {
-                            console.log("💰 (真實扣款) 訂單已發送！");
-                        } else {
-                            console.log("🛡️ 【保護模式啟動】程式已成功在雲端計算完畢，未扣款。");
-                        }
-                    } else {
-                        console.log("⚠️ 格式不符：找不到收盤價、停損，或『建議停利一』。");
-                    }
-                }
-            } catch (error) {
-                console.error("❌ 自動下單發生錯誤:", error.message);
-            }
-        }
-    }, new NewMessage({})); 
-}
-
-startBot();
-
-app.get('/api/messages', (req, res) => res.json(latestMessages));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 伺服器啟動: http://localhost:${PORT}/api/messages`));
+                        // 🌟 計算 80% 的停利數量
+                        const tp1Quantity = Math.floor(totalQuantity * 0.
