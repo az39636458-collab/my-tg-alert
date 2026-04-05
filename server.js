@@ -52,7 +52,7 @@ async function startBot() {
             };
 
             latestMessages.unshift(formattedMessage);
-            if (latestMessages.length > 50) {
+            if (latestMessages.length > 150) {
                 latestMessages.pop();
             }
 
