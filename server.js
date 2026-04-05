@@ -1,4 +1,4 @@
-const Bitunix = require('Bitunix');
+const Bitunix = require('./Bitunix');
 
 // 讓程式自己去 Railway 的保險箱拿鑰匙，絕對安全！
 const bitunix = new Bitunix({
