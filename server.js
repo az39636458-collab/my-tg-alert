@@ -17,7 +17,7 @@ app.use(cors());
 const apiId = 31121887;
 const apiHash = "6ce79e991f0849d80969c6ceae8e3be0";
 const targetChannel = "-1003202637717";  // 14439 快訊
-const signalChannel = "-3749280511";     // 幣幣通知測試（下單用）
+const signalChannel = "-1003749280511";     // 幣幣通知測試（下單用）
 
 const sessionString = "1BQANOTEuMTA4LjU2LjEyOQG7ujm2g/sSrgws1fBfTt7BHOyn3x5y8XPC/YxqkPsqz3QzYuKD2SSsDzovU3YbGFYQTUFfmdmI7It1pVzLnAzTF2onBFP5D2oAKKF/Qm9TJ42pIPj6M8XRAtmF+oHBSSzABWkAw8rrzZjdODf1v3/6GvkgKZnVS2d4zfzNrl7hDiXRSUOnqwPyxrDsw7q6FCbDa1XZr1GFkzqL2D62G/ucjgsAsaZ006vNIhQaLKtv9m48YyC94TAuEi5/CqYj7vS6vtHRU4zo5ozrUVRmJqMVnJqQ8StsOiv3v0CjtGhUu8Q8vYiEphafTpmpgV8I1LgLRfPv/DCKL5e4VzmFEk74xw==";
 // ==========================================
