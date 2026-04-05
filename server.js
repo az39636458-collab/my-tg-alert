@@ -1,6 +1,5 @@
 const Bitunix = require('./Bitunix');
 
-// 讓程式自己去 Railway 的保險箱拿鑰匙
 const bitunix = new Bitunix({
   apiKey: process.env.BITUNIX_API_KEY,
   apiSecret: process.env.BITUNIX_API_SECRET
@@ -15,12 +14,12 @@ const app = express();
 app.use(cors());
 
 // ==========================================
-// 1. 請填入你的專屬資料
+// 1. 你的專屬資料
 const apiId = 31121887; 
 const apiHash = "6ce79e991f0849d80969c6ceae8e3be0"; 
 const targetChannel = "-1003202637717"; 
 
-// 2. 你的專屬通行證
+// 2. 你的通行證
 const sessionString = "1BQANOTEuMTA4LjU2LjEyOQG7ujm2g/sSrgws1fBfTt7BHOyn3x5y8XPC/YxqkPsqz3QzYuKD2SSsDzovU3YbGFYQTUFfmdmI7It1pVzLnAzTF2onBFP5D2oAKKF/Qm9TJ42pIPj6M8XRAtmF+oHBSSzABWkAw8rrzZjdODf1v3/6GvkgKZnVS2d4zfzNrl7hDiXRSUOnqwPyxrDsw7q6FCbDa1XZr1GFkzqL2D62G/ucjgsAsaZ006vNIhQaLKtv9m48YyC94TAuEi5/CqYj7vS6vtHRU4zo5ozrUVRmJqMVnJqQ8StsOiv3v0CjtGhUu8Q8vYiEphafTpmpgV8I1LgLRfPv/DCKL5e4VzmFEk74xw=="; 
 // ==========================================
 
@@ -33,23 +32,18 @@ const client = new TelegramClient(new StringSession(sessionString), apiId, apiHa
 async function startBot() {
     await client.connect();
     console.log("✅ 成功使用通行證連線到 Telegram！");
-
-    console.log("正在同步頻道列表，請稍候...");
-    await client.getDialogs({});
-    console.log("✅ 頻道列表同步完成！開始盯盤...");
+    
+    console.log("準備啟動雷達...");
+    // 歷史訊息太重了，我們不下載，專心聽未來的新快訊就好！
+    console.log("✅ 準備完畢！開始盯盤...");
 
     client.addEventHandler(async (event) => {
         const date = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
         const currentChatId = event.message.chatId ? event.message.chatId.toString() : "";
-
         const messageText = event.message.message || "這是一張圖片或非文字訊息";
 
         if (currentChatId === targetChannel || messageText.includes("【幣幣篩選】")) {
-            const formattedMessage = {
-                time: date,
-                text: messageText
-            };
-
+            const formattedMessage = { time: date, text: messageText };
             latestMessages.unshift(formattedMessage);
             if (latestMessages.length > 150) latestMessages.pop();
 
@@ -66,30 +60,43 @@ async function startBot() {
                     const isShort = dirMatch[1] === "空";
                     const entryPriceMatch = messageText.match(/收盤價：([\d\.]+)/);
                     const stopLossMatch = messageText.match(/建議停損:([\d\.]+)/);
-                    const takeProfitMatch = messageText.match(/建議停利三:([\d\.]+)/);
+                    
+                    // 🌟 關鍵修改：現在改抓「建議停利一」
+                    const takeProfit1Match = messageText.match(/建議停利一:([\d\.]+)/);
 
-                    if (entryPriceMatch && stopLossMatch && takeProfitMatch) {
+                    if (entryPriceMatch && stopLossMatch && takeProfit1Match) {
                         const entryPrice = parseFloat(entryPriceMatch[1]);
                         const stopLoss = parseFloat(stopLossMatch[1]);
-                        const takeProfit = parseFloat(takeProfitMatch[1]);
+                        const takeProfit1 = parseFloat(takeProfit1Match[1]);
 
-                        // 🛡️ 容錯安全網：獲取餘額與計算數量
                         let totalBalance = 100; 
                         try {
                             const account = await bitunix.getAccount();
-                            // 嘗試抓取可用餘額，若抓不到則退回 100
-                            const balanceData = (account && account.data && account.data.available) ? account.data.available : 100;
-                            totalBalance = parseFloat(balanceData);
-                            console.log(`✅ 成功連線 Bitunix！讀取到可用餘額: ${totalBalance} USDT`);
+                            // 🌟 X光探照燈：把交易所回傳的所有資料印出來
+                            console.log(`🔍 [系統探照燈] 交易所回傳的完整資料:`, JSON.stringify(account.data));
+                            
+                            // 嘗試抓取各種可能的餘額名稱
+                            let available = account?.data?.available_balance || account?.data?.availableMargin || account?.data?.available;
+                            if (available) {
+                                totalBalance = parseFloat(available);
+                                console.log(`✅ 成功抓到真實餘額: ${totalBalance} USDT`);
+                            } else {
+                                console.log(`⚠️ 還是找不到餘額欄位，請把上面的 [系統探照燈] 日誌複製給我看！`);
+                            }
                         } catch (err) {
-                            console.log(`⚠️ 無法讀取真實餘額 (${err.response ? err.response.status : err.message})，切換為 [模擬餘額 100 USDT] 來計算數量。`);
+                            console.log(`⚠️ 無法讀取真實餘額，切換為模擬 100 USDT 計算。`);
                         }
 
-                        const leverage = 20; // 固定 20 倍槓桿
-                        const margin = totalBalance * 0.05; // 固定 5% 倉位
-                        const quantity = Math.floor((margin * leverage) / entryPrice);
+                        const leverage = 20; 
+                        const margin = totalBalance * 0.05; // 嚴格風控：最多 5% 倉位
+                        const totalQuantity = Math.floor((margin * leverage) / entryPrice);
+                        
+                        // 🌟 關鍵修改：計算 80% 的停利數量
+                        const tp1Quantity = Math.floor(totalQuantity * 0.8);
 
-                        console.log(`🤖 作戰計畫: ${isShort ? '做空' : '做多'} ${coin} | 數量: ${quantity} | 停損: ${stopLoss} | 停利: ${takeProfit}`);
+                        console.log(`🤖 作戰計畫: ${isShort ? '做空' : '做多'} ${coin} | 進場價: ${entryPrice}`);
+                        console.log(`📊 總數量: ${totalQuantity} | 停損設在: ${stopLoss} (全倉)`);
+                        console.log(`🎯 停利一目標: ${takeProfit1} | 到達時平倉數量: ${tp1Quantity} (80%倉位)`);
 
                         const LIVE_TRADING = false; 
 
@@ -99,7 +106,7 @@ async function startBot() {
                             console.log("🛡️ 【保護模式啟動】程式已成功在雲端計算完畢，未扣款。");
                         }
                     } else {
-                        console.log("⚠️ 格式不符：找不到收盤價或停損/停利點位，跳過此單。");
+                        console.log("⚠️ 格式不符：找不到收盤價、停損，或『建議停利一』。");
                     }
                 }
             } catch (error) {
@@ -111,11 +118,7 @@ async function startBot() {
 
 startBot();
 
-app.get('/api/messages', (req, res) => {
-    res.json(latestMessages);
-});
+app.get('/api/messages', (req, res) => res.json(latestMessages));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 伺服器已啟動！資料將輸出到: http://localhost:${PORT}/api/messages`);
-});
+app.listen(PORT, () => console.log(`🚀 伺服器啟動: http://localhost:${PORT}/api/messages`));
