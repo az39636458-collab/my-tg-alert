@@ -9,21 +9,31 @@ class Bitunix {
     }
 
     async getAccount() {
-        return this.request('GET', '/api/v1/futures/account');
+        // ✅ 加上 marginCoin=USDT 參數
+        return this.request('GET', '/api/v1/futures/account', { marginCoin: 'USDT' });
     }
 
     async request(method, path, params = {}) {
         const nonce = crypto.randomBytes(16).toString('hex');
         const timestamp = Date.now().toString();
-        const bodyStr = method === 'GET' ? '' : JSON.stringify(params);
-        
+
+        // GET 參數放 queryString，POST 放 body
+        let queryString = '';
+        let bodyStr = '';
+
+        if (method === 'GET' && Object.keys(params).length > 0) {
+            queryString = '?' + new URLSearchParams(params).toString();
+        } else if (method !== 'GET') {
+            bodyStr = JSON.stringify(params);
+        }
+
         const digest_input = nonce + timestamp + this.apiKey + bodyStr;
         const first_hash = crypto.createHash('sha256').update(digest_input).digest('hex');
         const signature = crypto.createHash('sha256').update(first_hash + this.apiSecret).digest('hex');
 
         const config = {
             method,
-            url: `${this.baseUrl}${path}`,
+            url: `${this.baseUrl}${path}${queryString}`,
             headers: {
                 'api-key': this.apiKey,
                 'nonce': nonce,
