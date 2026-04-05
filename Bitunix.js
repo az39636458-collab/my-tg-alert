@@ -13,24 +13,32 @@ class Bitunix {
     }
 
     async request(method, path, params = {}) {
-        const nonce = crypto.randomBytes(16).toString('hex');
+        const nonce = crypto.randomBytes(16).toString('hex').substring(0, 32);
         const timestamp = Date.now().toString();
 
         let queryString = '';
-        let bodyStr = '';
-        let paramStr = '';
+        let queryParams = '';
+        let body = '';
 
         if (method === 'GET' && Object.keys(params).length > 0) {
-            queryString = '?' + new URLSearchParams(params).toString();
-            paramStr = new URLSearchParams(params).toString();
-        } else if (method !== 'GET') {
-            bodyStr = JSON.stringify(params);
-            paramStr = bodyStr;
+            // GET: queryParams 按 ASCII 排序，格式 key1value1key2value2
+            const sortedKeys = Object.keys(params).sort();
+            queryParams = sortedKeys.map(k => `${k}${params[k]}`).join('');
+            queryString = '?' + sortedKeys.map(k => `${k}=${params[k]}`).join('&');
+        } else if (method !== 'GET' && Object.keys(params).length > 0) {
+            // POST: body 移除所有空格
+            body = JSON.stringify(params).replace(/\s/g, '');
         }
 
-        const digest_input = nonce + timestamp + this.apiKey + paramStr;
-        const first_hash = crypto.createHash('sha256').update(digest_input).digest('hex');
-        const signature = crypto.createHash('sha256').update(first_hash + this.apiSecret).digest('hex');
+        // 簽名: SHA256(nonce + timestamp + apiKey + queryParams + body)
+        const digest = crypto.createHash('sha256')
+            .update(nonce + timestamp + this.apiKey + queryParams + body)
+            .digest('hex');
+        
+        // 第二次: SHA256(digest + secretKey)
+        const sign = crypto.createHash('sha256')
+            .update(digest + this.apiSecret)
+            .digest('hex');
 
         const config = {
             method,
@@ -39,12 +47,12 @@ class Bitunix {
                 'api-key': this.apiKey,
                 'nonce': nonce,
                 'timestamp': timestamp,
-                'sign': signature,
+                'sign': sign,
                 'Content-Type': 'application/json'
             }
         };
 
-        if (method !== 'GET') config.data = params;
+        if (method !== 'GET') config.data = JSON.parse(body || '{}');
 
         try {
             const response = await axios(config);
