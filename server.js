@@ -18,7 +18,7 @@ app.use(cors()); // 允許你的 Vercel 網頁來讀取資料
 // 1. 請填入你的專屬資料
 const apiId = 31121887; 
 const apiHash = "6ce79e991f0849d80969c6ceae8e3be0"; 
-const targetChannel = "-1003202637717"; // 目標頻道
+const targetChannel = "-1003202637717"; // 目標頻道 (14439快訊)
 
 // 2. 你的專屬通行證
 const sessionString = "1BQANOTEuMTA4LjU2LjEyOQG7ujm2g/sSrgws1fBfTt7BHOyn3x5y8XPC/YxqkPsqz3QzYuKD2SSsDzovU3YbGFYQTUFfmdmI7It1pVzLnAzTF2onBFP5D2oAKKF/Qm9TJ42pIPj6M8XRAtmF+oHBSSzABWkAw8rrzZjdODf1v3/6GvkgKZnVS2d4zfzNrl7hDiXRSUOnqwPyxrDsw7q6FCbDa1XZr1GFkzqL2D62G/ucjgsAsaZ006vNIhQaLKtv9m48YyC94TAuEi5/CqYj7vS6vtHRU4zo5ozrUVRmJqMVnJqQ8StsOiv3v0CjtGhUu8Q8vYiEphafTpmpgV8I1LgLRfPv/DCKL5e4VzmFEk74xw=="; 
@@ -40,15 +40,16 @@ async function startBot() {
     await client.getDialogs({});
     console.log("✅ 頻道列表同步完成！開始盯盤...");
 
-    // ⚠️ 這裡加入了 async，讓機器人可以查餘額
     client.addEventHandler(async (event) => {
         const date = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' });
-        
         const currentChatId = event.message.chatId ? event.message.chatId.toString() : "";
         console.log(`[測試] 收到新訊息！來源ID: ${currentChatId}`);
 
-        if (currentChatId === targetChannel) {
-            const messageText = event.message.message || "這是一張圖片或非文字訊息";
+        // ⚠️ 關鍵修改：先把文字抓出來，才能判斷裡面有沒有關鍵字
+        const messageText = event.message.message || "這是一張圖片或非文字訊息";
+
+        // 🌟 雙通道雷達：(來源是目標頻道) 或者 (訊息裡面有【幣幣篩選】) 兩者符合其一就放行！
+        if (currentChatId === targetChannel || messageText.includes("【幣幣篩選】")) {
             const formattedMessage = {
                 time: date,
                 text: messageText
