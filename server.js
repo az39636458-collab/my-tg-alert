@@ -4,6 +4,7 @@ const cors = require('cors');
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
+const Redis = require('ioredis');
 
 const app = express();
 app.use(cors());
@@ -11,24 +12,40 @@ app.use(cors());
 // ==========================================
 const apiId = 31121887;
 const apiHash = "6ce79e991f0849d80969c6ceae8e3be0";
-const targetChannel = "-1003202637717";   // 14439 快訊
-const signalChannel = "-1003749280511";   // 幣幣通知測試（下單用）
+const targetChannel = "-1003202637717";
+const signalChannel = "-1003749280511";
 
 const sessionString = "1BQANOTEuMTA4LjU2LjEyOQG7ujm2g/sSrgws1fBfTt7BHOyn3x5y8XPC/YxqkPsqz3QzYuKD2SSsDzovU3YbGFYQTUFfmdmI7It1pVzLnAzTF2onBFP5D2oAKKF/Qm9TJ42pIPj6M8XRAtmF+oHBSSzABWkAw8rrzZjdODf1v3/6GvkgKZnVS2d4zfzNrl7hDiXRSUOnqwPyxrDsw7q6FCbDa1XZr1GFkzqL2D62G/ucjgsAsaZ006vNIhQaLKtv9m48YyC94TAuEi5/CqYj7vS6vtHRU4zo5ozrUVRmJqMVnJqQ8StsOiv3v0CjtGhUu8Q8vYiEphafTpmpgV8I1LgLRfPv/DCKL5e4VzmFEk74xw==";
 
-const LIVE_TRADING = true; // ⚠️ 改成 true 才會真實下單
+const LIVE_TRADING = true;
 // ==========================================
+
+// Redis 連線
+const redis = new Redis(process.env.REDIS_URL);
+redis.on('connect', () => console.log('✅ Redis 已連線'));
+redis.on('error', (err) => console.error('❌ Redis 錯誤:', err.message));
+
+const MESSAGES_KEY = 'latestMessages';
+const MAX_MESSAGES = 150;
+
+// 存訊息到 Redis
+async function saveMessage(msg) {
+    await redis.lpush(MESSAGES_KEY, JSON.stringify(msg));
+    await redis.ltrim(MESSAGES_KEY, 0, MAX_MESSAGES - 1);
+}
+
+// 從 Redis 讀取訊息
+async function getMessages() {
+    const items = await redis.lrange(MESSAGES_KEY, 0, MAX_MESSAGES - 1);
+    return items.map(i => JSON.parse(i));
+}
 
 const bitunix = new Bitunix({
     apiKey: process.env.BITUNIX_API_KEY,
     apiSecret: process.env.BITUNIX_API_SECRET
 });
 
-// 記錄所有進場中的倉位
-// { positionId: { symbol, side, entryPrice, totalQty, tp1Qty, remainQty, tp1Price, tp2Price, stopLoss } }
 const activePositions = new Map();
-
-let latestMessages = [];
 
 const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
     connectionRetries: 5,
@@ -63,20 +80,17 @@ async function executeOrder(messageText) {
     const tp1Price   = parseFloat(takeProfit1Match[1]);
     const tp2Price   = takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null;
 
-    // ===== 檢查同幣種是否已有倉位 =====
     if ([...activePositions.values()].some(p => p.symbol === symbol)) {
         console.log(`⏭️ ${symbol} 已有未平倉位，略過此訊號`);
         return;
     }
 
-    // ===== 計算停損幅度，決定倉位比例 =====
     const slPercent = Math.abs((stopLoss - entryPrice) / entryPrice) * 100;
     console.log(`📏 停損幅度: ${slPercent.toFixed(2)}%`);
 
     const riskRatio = slPercent >= 8 ? 0.03 : 0.05;
     console.log(`💼 倉位比例: ${riskRatio * 100}% (${slPercent >= 8 ? '停損過大，降低倉位' : '正常倉位'})`);
 
-    // ===== 取得餘額 =====
     let totalBalance = 100;
     try {
         const account = await bitunix.getAccount();
@@ -84,8 +98,6 @@ async function executeOrder(messageText) {
         if (available) {
             totalBalance = parseFloat(available);
             console.log(`✅ 真實餘額: ${totalBalance} USDT`);
-        } else {
-            console.log(`⚠️ 找不到餘額欄位，用模擬 100 USDT`);
         }
     } catch (err) {
         console.log(`⚠️ 無法讀取餘額，用模擬 100 USDT`);
@@ -106,9 +118,7 @@ async function executeOrder(messageText) {
         return;
     }
 
-    // ===== 真實下單 =====
     try {
-        // 1. 市價進場
         console.log(`💰 送出市價單...`);
         const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
         if (orderRes.code !== 0) {
@@ -117,7 +127,6 @@ async function executeOrder(messageText) {
         }
         console.log(`✅ 進場成功！orderId=${orderRes.data.orderId}`);
 
-        // 2. 等待成交，取得倉位資訊
         await new Promise(r => setTimeout(r, 2000));
         const positions = await bitunix.getPendingPositions(symbol);
         const pos = positions?.data?.find(p => p.symbol === symbol);
@@ -129,18 +138,15 @@ async function executeOrder(messageText) {
         const actualEntry = parseFloat(pos.openPrice || entryPrice);
         console.log(`✅ 倉位確認: positionId=${positionId} | 實際開倉價=${actualEntry}`);
 
-        // 3. 記錄倉位資訊
         activePositions.set(positionId, {
             symbol, side, entryPrice: actualEntry,
             totalQty, tp1Qty, remainQty,
             tp1Price, tp2Price, stopLoss
         });
 
-        // 4. 掛止損（全倉）
         await bitunix.placePositionTpSl(symbol, positionId, null, stopLoss);
         console.log(`✅ 止損單掛出: ${stopLoss}`);
 
-        // 5. 掛止盈一（80% 倉位限價平倉，帶 clientId 供 WebSocket 識別）
         const closeSide = isShort ? 'BUY' : 'SELL';
         const tp1Res = await bitunix.request('POST', '/api/v1/futures/trade/place_order', {
             symbol,
@@ -175,12 +181,9 @@ async function onTp1Filled(positionId, order) {
     console.log(`🔄 止盈一成交！移動止損到開倉價 ${pos.entryPrice}...`);
 
     try {
-        // 移動止損到開倉價（剩餘 20% 保本，繼續跑向止盈二）
         await bitunix.modifyPositionSl(pos.symbol, positionId, pos.entryPrice);
         console.log(`✅ 止損已移到開倉價 ${pos.entryPrice}`);
         console.log(`🎯 剩餘 ${pos.remainQty} 顆繼續跑，目標止盈二: ${pos.tp2Price || '無'}`);
-
-        // 從記錄中移除（止盈一已成交，剩餘部分由止損保護）
         activePositions.delete(positionId);
     } catch (err) {
         console.error('❌ 移動止損失敗:', err.message);
@@ -193,7 +196,6 @@ async function startBot() {
     console.log("✅ 成功連線到 Telegram！");
     console.log("✅ 開始盯盤...");
 
-    // 啟動 Bitunix WebSocket 監聽止盈成交
     bitunix.startWebSocket(onTp1Filled);
 
     client.addEventHandler(async (event) => {
@@ -203,11 +205,10 @@ async function startBot() {
 
         console.log(`📩 收到訊息: chatId=${currentChatId}, 內容前30字=[${messageText.substring(0, 30)}]`);
 
-        // ===== 14439 快訊：存入顯示 =====
+        // ===== 14439 快訊：存入 Redis =====
         if (currentChatId === targetChannel) {
-            latestMessages.unshift({ time: date, text: messageText });
-            if (latestMessages.length > 150) latestMessages.pop();
-            console.log(`⚡ 14439快訊已存入！`);
+            await saveMessage({ time: date, text: messageText });
+            console.log(`⚡ 14439快訊已存入 Redis！`);
         }
 
         // ===== 幣幣篩選：自動下單 =====
@@ -221,7 +222,10 @@ async function startBot() {
 
 startBot();
 
-app.get('/api/messages', (req, res) => res.json(latestMessages));
+app.get('/api/messages', async (req, res) => {
+    const messages = await getMessages();
+    res.json(messages);
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
