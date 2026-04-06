@@ -132,17 +132,16 @@ async function executeOrder(messageText) {
         console.log(`✅ 進場成功！orderId=${orderRes.data.orderId}`);
 
         await new Promise(r => setTimeout(r, 2000));
-        const positions = await bitunix.getPendingPositions(symbol);
-        console.log(`🔍 倉位查詢結果:`, JSON.stringify(positions?.data));
-        const pos = positions?.data?.find(p => p.symbol === symbol);
-        if (!pos) {
-            console.error('❌ 找不到倉位資訊');
-            return;
-        }
-        const positionId  = pos.positionId;
-        const actualEntry = parseFloat(pos.openPrice || entryPrice);
-        console.log(`✅ 倉位確認: positionId=${positionId} | 實際開倉價=${actualEntry}`);
-
+       const positions = await bitunix.getPendingPositions(symbol);
+       console.log(`🔍 倉位查詢結果:`, JSON.stringify(positions?.data));
+       const pos = positions?.data?.find(p => p.symbol === symbol);
+       if (!pos) {
+       console.error('❌ 找不到倉位資訊');
+       return;
+       }
+       const positionId  = pos.positionId;
+       const actualEntry = parseFloat(pos.avgOpenPrice || entryPrice); // ✅ 改這裡
+       console.log(`✅ 倉位確認: positionId=${positionId} | 實際開倉價=${actualEntry}`);
         activePositions.set(positionId, {
             symbol, side, entryPrice: actualEntry,
             totalQty, tp1Qty, remainQty,

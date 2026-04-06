@@ -82,8 +82,8 @@ class Bitunix {
 
     // ==================== 查詢持倉 ====================
     async getPendingPositions(symbol) {
-        return this.request('GET', '/api/v1/futures/position/pending_positions', { symbol });
-    }
+        return this.request('GET', '/api/v1/futures/position/get_pending_positions', { symbol });
+    }   
 
     // ==================== 掛止盈止損（整個倉位）====================
     async placePositionTpSl(symbol, positionId, tpPrice, slPrice) {
