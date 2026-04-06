@@ -17,7 +17,7 @@ const signalChannel = "-1003749280511";
 
 const sessionString = "1BQANOTEuMTA4LjU2LjEyOQG7ujm2g/sSrgws1fBfTt7BHOyn3x5y8XPC/YxqkPsqz3QzYuKD2SSsDzovU3YbGFYQTUFfmdmI7It1pVzLnAzTF2onBFP5D2oAKKF/Qm9TJ42pIPj6M8XRAtmF+oHBSSzABWkAw8rrzZjdODf1v3/6GvkgKZnVS2d4zfzNrl7hDiXRSUOnqwPyxrDsw7q6FCbDa1XZr1GFkzqL2D62G/ucjgsAsaZ006vNIhQaLKtv9m48YyC94TAuEi5/CqYj7vS6vtHRU4zo5ozrUVRmJqMVnJqQ8StsOiv3v0CjtGhUu8Q8vYiEphafTpmpgV8I1LgLRfPv/DCKL5e4VzmFEk74xw==";
 
-const LIVE_TRADING = false;
+const LIVE_TRADING = true; // ⚠️ 改成 false 暫停下單
 // ==========================================
 
 // Redis 連線
@@ -28,13 +28,11 @@ redis.on('error', (err) => console.error('❌ Redis 錯誤:', err.message));
 const MESSAGES_KEY = 'latestMessages';
 const MAX_MESSAGES = 150;
 
-// 存訊息到 Redis
 async function saveMessage(msg) {
     await redis.lpush(MESSAGES_KEY, JSON.stringify(msg));
     await redis.ltrim(MESSAGES_KEY, 0, MAX_MESSAGES - 1);
 }
 
-// 從 Redis 讀取訊息
 async function getMessages() {
     const items = await redis.lrange(MESSAGES_KEY, 0, MAX_MESSAGES - 1);
     return items.map(i => JSON.parse(i));
@@ -45,11 +43,49 @@ const bitunix = new Bitunix({
     apiSecret: process.env.BITUNIX_API_SECRET
 });
 
+// 記錄所有進場中的倉位
 const activePositions = new Map();
 
 const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
     connectionRetries: 5,
 });
+
+// ==================== 倉位監控（偵測止盈一成交）====================
+async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
+    console.log(`👁️ 開始監控倉位: ${symbol} | positionId=${positionId} | 原始數量=${originalQty}`);
+
+    const interval = setInterval(async () => {
+        try {
+            const positions = await bitunix.getPendingPositions(symbol);
+            const pos = positions?.data?.find(p => p.positionId === positionId);
+
+            if (!pos) {
+                console.log(`✅ ${symbol} 倉位已全部平倉，停止監控`);
+                activePositions.delete(positionId);
+                clearInterval(interval);
+                return;
+            }
+
+            const currentQty = parseFloat(pos.qty);
+            console.log(`🔍 ${symbol} 倉位監控: 當前數量=${currentQty} / 原始=${originalQty}`);
+
+            // 數量減少超過 10%，代表止盈一成交了
+            if (currentQty < originalQty * 0.9) {
+                console.log(`🎯 ${symbol} 止盈一已成交！移動止損到開倉價 ${entryPrice}...`);
+                const res = await bitunix.modifyPositionSl(symbol, positionId, entryPrice);
+                if (res.code === 0) {
+                    console.log(`✅ 止損已移到開倉價 ${entryPrice}，剩餘倉位繼續跑向止盈二`);
+                } else {
+                    console.error(`❌ 移動止損失敗:`, JSON.stringify(res));
+                }
+                activePositions.delete(positionId);
+                clearInterval(interval);
+            }
+        } catch (err) {
+            console.error('❌ 倉位監控錯誤:', err.message);
+        }
+    }, 10000); // 每 10 秒檢查一次
+}
 
 // ==================== 自動下單主流程 ====================
 async function executeOrder(messageText) {
@@ -80,21 +116,23 @@ async function executeOrder(messageText) {
     const tp1Price   = parseFloat(takeProfit1Match[1]);
     const tp2Price   = takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null;
 
-    // 新版：同幣種同方向才略過
+    // 同幣種同方向才略過
     const sameSidePosition = [...activePositions.values()].find(
-    p => p.symbol === symbol && p.side === side
+        p => p.symbol === symbol && p.side === side
     );
     if (sameSidePosition) {
-    console.log(`⏭️ ${symbol} 已有相同方向倉位，略過此訊號`);
-    return;
+        console.log(`⏭️ ${symbol} 已有相同方向倉位，略過此訊號`);
+        return;
     }
 
+    // 計算停損幅度
     const slPercent = Math.abs((stopLoss - entryPrice) / entryPrice) * 100;
     console.log(`📏 停損幅度: ${slPercent.toFixed(2)}%`);
 
     const riskRatio = slPercent >= 8 ? 0.03 : 0.05;
     console.log(`💼 倉位比例: ${riskRatio * 100}% (${slPercent >= 8 ? '停損過大，降低倉位' : '正常倉位'})`);
 
+    // 取得餘額
     let totalBalance = 100;
     try {
         const account = await bitunix.getAccount();
@@ -123,6 +161,7 @@ async function executeOrder(messageText) {
     }
 
     try {
+        // 1. 市價進場
         console.log(`💰 送出市價單...`);
         const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
         if (orderRes.code !== 0) {
@@ -131,66 +170,43 @@ async function executeOrder(messageText) {
         }
         console.log(`✅ 進場成功！orderId=${orderRes.data.orderId}`);
 
+        // 2. 等待成交，取得倉位資訊
         await new Promise(r => setTimeout(r, 2000));
-       const positions = await bitunix.getPendingPositions(symbol);
-       console.log(`🔍 倉位查詢結果:`, JSON.stringify(positions?.data));
-       const pos = positions?.data?.find(p => p.symbol === symbol);
-       if (!pos) {
-       console.error('❌ 找不到倉位資訊');
-       return;
-       }
-       const positionId  = pos.positionId;
-       const actualEntry = parseFloat(pos.avgOpenPrice || entryPrice); // ✅ 改這裡
-       console.log(`✅ 倉位確認: positionId=${positionId} | 實際開倉價=${actualEntry}`);
+        const positions = await bitunix.getPendingPositions(symbol);
+        console.log(`🔍 倉位查詢結果:`, JSON.stringify(positions?.data));
+        const pos = positions?.data?.find(p => p.symbol === symbol);
+        if (!pos) {
+            console.error('❌ 找不到倉位資訊');
+            return;
+        }
+        const positionId  = pos.positionId;
+        const actualEntry = parseFloat(pos.avgOpenPrice || entryPrice);
+        console.log(`✅ 倉位確認: positionId=${positionId} | 實際開倉價=${actualEntry}`);
+
+        // 3. 記錄倉位資訊
         activePositions.set(positionId, {
             symbol, side, entryPrice: actualEntry,
             totalQty, tp1Qty, remainQty,
             tp1Price, tp2Price, stopLoss
         });
 
-        await bitunix.placePositionTpSl(symbol, positionId, null, stopLoss);
-        console.log(`✅ 止損單掛出: ${stopLoss}`);
-
-        const closeSide = isShort ? 'BUY' : 'SELL';
-        const tp1Res = await bitunix.request('POST', '/api/v1/futures/trade/place_order', {
-            symbol,
-            side: closeSide,
-            qty: tp1Qty.toString(),
-            price: tp1Price.toString(),
-            orderType: 'LIMIT',
-            tradeSide: 'CLOSE',
-            positionId,
-            effect: 'GTC',
-            clientId: `tp1_${positionId}`
-        });
-        if (tp1Res.code === 0) {
-            console.log(`✅ 止盈一掛出: 價格=${tp1Price} | 數量=${tp1Qty}`);
+        // 4. 同時掛止損（全倉）+ 止盈一（80%）
+        const tpSlRes = await bitunix.placeTpSl(
+            symbol, positionId,
+            tp1Price, tp1Qty,
+            stopLoss, totalQty
+        );
+        if (tpSlRes.code === 0) {
+            console.log(`✅ 止損+止盈一掛出成功！止損=${stopLoss}(全倉) | 止盈一=${tp1Price}(${tp1Qty}顆/80%)`);
         } else {
-            console.error('❌ 止盈一掛單失敗:', JSON.stringify(tp1Res));
+            console.error('❌ 止損+止盈一掛單失敗:', JSON.stringify(tpSlRes));
         }
+
+        // 5. 啟動倉位監控（偵測止盈一成交後移動止損）
+        monitorPosition(positionId, symbol, totalQty, actualEntry);
 
     } catch (err) {
         console.error('❌ 下單流程錯誤:', err.message);
-    }
-}
-
-// ==================== 止盈一成交後的處理 ====================
-async function onTp1Filled(positionId, order) {
-    const pos = activePositions.get(positionId);
-    if (!pos) {
-        console.log(`⚠️ 找不到 positionId=${positionId} 的倉位記錄`);
-        return;
-    }
-
-    console.log(`🔄 止盈一成交！移動止損到開倉價 ${pos.entryPrice}...`);
-
-    try {
-        await bitunix.modifyPositionSl(pos.symbol, positionId, pos.entryPrice);
-        console.log(`✅ 止損已移到開倉價 ${pos.entryPrice}`);
-        console.log(`🎯 剩餘 ${pos.remainQty} 顆繼續跑，目標止盈二: ${pos.tp2Price || '無'}`);
-        activePositions.delete(positionId);
-    } catch (err) {
-        console.error('❌ 移動止損失敗:', err.message);
     }
 }
 
@@ -200,7 +216,7 @@ async function startBot() {
     console.log("✅ 成功連線到 Telegram！");
     console.log("✅ 開始盯盤...");
 
-    bitunix.startWebSocket(onTp1Filled);
+    bitunix.startWebSocket(() => {}); // 保持 WebSocket 連線
 
     client.addEventHandler(async (event) => {
         const messageText = event.message.message || "";
