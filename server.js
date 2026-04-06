@@ -43,14 +43,13 @@ const bitunix = new Bitunix({
     apiSecret: process.env.BITUNIX_API_SECRET
 });
 
-// 記錄所有進場中的倉位
 const activePositions = new Map();
 
 const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
     connectionRetries: 5,
 });
 
-// ==================== 倉位監控（偵測止盈一成交）====================
+// ==================== 倉位監控 ====================
 async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
     console.log(`👁️ 開始監控倉位: ${symbol} | positionId=${positionId} | 原始數量=${originalQty}`);
 
@@ -71,20 +70,41 @@ async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
 
             // 數量減少超過 10%，代表止盈一成交了
             if (currentQty < originalQty * 0.9) {
-                console.log(`🎯 ${symbol} 止盈一已成交！移動止損到開倉價 ${entryPrice}...`);
-                const res = await bitunix.modifyPositionSl(symbol, positionId, entryPrice);
-                if (res.code === 0) {
-                    console.log(`✅ 止損已移到開倉價 ${entryPrice}，剩餘倉位繼續跑向止盈二`);
+                console.log(`🎯 ${symbol} 止盈一已成交！`);
+
+                const posInfo = activePositions.get(positionId);
+
+                // 1. 修改止損到開倉價
+                const slRes = await bitunix.modifyPositionSl(symbol, positionId, entryPrice);
+                if (slRes.code === 0) {
+                    console.log(`✅ 止損已移到開倉價 ${entryPrice}`);
                 } else {
-                    console.error(`❌ 移動止損失敗:`, JSON.stringify(res));
+                    console.error(`❌ 移動止損失敗:`, JSON.stringify(slRes));
                 }
+
+                // 2. 掛止盈二（剩餘 20%）
+                if (posInfo?.tp2Price) {
+                    const tp2Res = await bitunix.placeTpSl(
+                        symbol, positionId,
+                        posInfo.tp2Price, posInfo.remainQty,
+                        entryPrice, posInfo.remainQty
+                    );
+                    if (tp2Res.code === 0) {
+                        console.log(`✅ 止盈二掛出成功！止盈二=${posInfo.tp2Price}(${posInfo.remainQty}顆/20%)`);
+                    } else {
+                        console.error('❌ 止盈二掛單失敗:', JSON.stringify(tp2Res));
+                    }
+                } else {
+                    console.log(`⚠️ 無止盈二資料，剩餘倉位僅靠止損保本`);
+                }
+
                 activePositions.delete(positionId);
                 clearInterval(interval);
             }
         } catch (err) {
             console.error('❌ 倉位監控錯誤:', err.message);
         }
-    }, 10000); // 每 10 秒檢查一次
+    }, 10000);
 }
 
 // ==================== 自動下單主流程 ====================
@@ -202,7 +222,7 @@ async function executeOrder(messageText) {
             console.error('❌ 止損+止盈一掛單失敗:', JSON.stringify(tpSlRes));
         }
 
-        // 5. 啟動倉位監控（偵測止盈一成交後移動止損）
+        // 5. 啟動倉位監控
         monitorPosition(positionId, symbol, totalQty, actualEntry);
 
     } catch (err) {
@@ -216,7 +236,7 @@ async function startBot() {
     console.log("✅ 成功連線到 Telegram！");
     console.log("✅ 開始盯盤...");
 
-    bitunix.startWebSocket(() => {}); // 保持 WebSocket 連線
+    bitunix.startWebSocket(() => {});
 
     client.addEventHandler(async (event) => {
         const messageText = event.message.message || "";
