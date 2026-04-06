@@ -80,23 +80,33 @@ class Bitunix {
         return this.request('GET', '/api/v1/futures/position/get_pending_positions', { symbol });
     }
 
-    // 同時掛止損（全倉）+ 止盈一（80% 數量）
-    async placeTpSl(symbol, positionId, tp1Price, tp1Qty, slPrice, totalQty) {
-        return this.request('POST', '/api/v1/futures/tpsl/place_order', {
+    // 掛止盈止損單（可指定數量）
+    async placeTpSl(symbol, positionId, tpPrice, tpQty, slPrice, slQty) {
+        const params = { symbol, positionId };
+        if (tpPrice) {
+            params.tpPrice = tpPrice.toString();
+            params.tpStopType = 'LAST_PRICE';
+            params.tpOrderType = 'MARKET';
+            params.tpQty = tpQty.toString();
+        }
+        if (slPrice) {
+            params.slPrice = slPrice.toString();
+            params.slStopType = 'LAST_PRICE';
+            params.slOrderType = 'MARKET';
+            params.slQty = slQty.toString();
+        }
+        return this.request('POST', '/api/v1/futures/tpsl/place_order', params);
+    }
+
+    // 取消止盈止損單
+    async cancelTpSl(symbol, orderId) {
+        return this.request('POST', '/api/v1/futures/tpsl/cancel_order', {
             symbol,
-            positionId,
-            tpPrice: tp1Price.toString(),
-            tpStopType: 'LAST_PRICE',
-            tpOrderType: 'MARKET',
-            tpQty: tp1Qty.toString(),
-            slPrice: slPrice.toString(),
-            slStopType: 'LAST_PRICE',
-            slOrderType: 'MARKET',
-            slQty: totalQty.toString()
+            orderId
         });
     }
 
-    // 修改止損到開倉價（止盈一成交後）
+    // 修改倉位止損
     async modifyPositionSl(symbol, positionId, newSlPrice) {
         return this.request('POST', '/api/v1/futures/tpsl/position/modify_order', {
             symbol,
@@ -106,7 +116,7 @@ class Bitunix {
         });
     }
 
-    startWebSocket(onTp1Filled) {
+    startWebSocket(onMessage) {
         const nonce = crypto.randomBytes(16).toString('hex').substring(0, 32);
         const timestamp = Math.floor(Date.now() / 1000);
         const digest = crypto.createHash('sha256')
@@ -134,31 +144,17 @@ class Bitunix {
         this.ws.on('message', (data) => {
             try {
                 const msg = JSON.parse(data.toString());
-
                 if (msg.op === 'login' && msg.code === 0) {
-                    console.log('✅ Bitunix WebSocket 登入成功，訂閱訂單頻道...');
+                    console.log('✅ Bitunix WebSocket 登入成功');
                     this.ws.send(JSON.stringify({
                         op: 'subscribe',
                         args: [{ ch: 'order' }]
                     }));
                 }
-
-                if (msg.ch === 'order' && msg.data) {
-                    const order = msg.data;
-                    console.log(`📡 WebSocket 訂單更新: ${order.symbol} | status=${order.orderStatus} | clientId=${order.clientId}`);
-
-                    // 止盈一成交（clientId 格式: tp1_{positionId}）
-                    if (order.orderStatus === 'FILLED' && order.clientId && order.clientId.startsWith('tp1_')) {
-                        const positionId = order.clientId.replace('tp1_', '');
-                        console.log(`🎯 止盈一成交！positionId=${positionId}`);
-                        if (onTp1Filled) onTp1Filled(positionId, order);
-                    }
-                }
-
                 if (msg.op === 'ping') {
                     this.ws.send(JSON.stringify({ op: 'pong', pong: msg.ping }));
                 }
-
+                if (onMessage) onMessage(msg);
             } catch (e) {
                 console.error('❌ WebSocket 訊息解析錯誤:', e.message);
             }
@@ -166,7 +162,7 @@ class Bitunix {
 
         this.ws.on('close', () => {
             console.log('⚠️ Bitunix WebSocket 斷線，5秒後重連...');
-            setTimeout(() => this.startWebSocket(onTp1Filled), 5000);
+            setTimeout(() => this.startWebSocket(onMessage), 5000);
         });
 
         this.ws.on('error', (err) => {

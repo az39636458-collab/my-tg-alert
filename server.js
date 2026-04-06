@@ -20,7 +20,6 @@ const sessionString = "1BQANOTEuMTA4LjU2LjEyOQG7ujm2g/sSrgws1fBfTt7BHOyn3x5y8XPC
 const LIVE_TRADING = true; // ⚠️ 改成 false 暫停下單
 // ==========================================
 
-// Redis 連線
 const redis = new Redis(process.env.REDIS_URL);
 redis.on('connect', () => console.log('✅ Redis 已連線'));
 redis.on('error', (err) => console.error('❌ Redis 錯誤:', err.message));
@@ -50,8 +49,11 @@ const client = new TelegramClient(new StringSession(sessionString), apiId, apiHa
 });
 
 // ==================== 倉位監控 ====================
-async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
-    console.log(`👁️ 開始監控倉位: ${symbol} | positionId=${positionId} | 原始數量=${originalQty}`);
+async function monitorPosition(positionId, symbol, originalQty, entryPrice, initialOrderId) {
+    console.log(`👁️ 開始監控: ${symbol} | positionId=${positionId} | 原始數量=${originalQty}`);
+
+    let phase = 1;
+    let currentTpSlOrderId = initialOrderId;
 
     const interval = setInterval(async () => {
         try {
@@ -66,41 +68,73 @@ async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
             }
 
             const currentQty = parseFloat(pos.qty);
-            console.log(`🔍 ${symbol} 倉位監控: 當前數量=${currentQty} / 原始=${originalQty}`);
+            const posInfo = activePositions.get(positionId);
+            console.log(`🔍 ${symbol} 階段${phase}: 當前數量=${currentQty} / 原始=${originalQty}`);
 
-            // 數量減少超過 10%，代表止盈一成交了
-            if (currentQty < originalQty * 0.9) {
-                console.log(`🎯 ${symbol} 止盈一已成交！`);
+            // ===== 止盈一成交（數量剩約 20%）=====
+            if (phase === 1 && currentQty < originalQty * 0.9) {
+                console.log(`🎯 ${symbol} 止盈一成交！`);
+                phase = 2;
 
-                const posInfo = activePositions.get(positionId);
+                const tp2Qty = Math.floor(currentQty * 0.8); // 剩餘的 80%
+                const tp3Qty = currentQty - tp2Qty;           // 剩餘的 20%
 
-                // 1. 修改止損到開倉價
-                const slRes = await bitunix.modifyPositionSl(symbol, positionId, entryPrice);
-                if (slRes.code === 0) {
-                    console.log(`✅ 止損已移到開倉價 ${entryPrice}`);
-                } else {
-                    console.error(`❌ 移動止損失敗:`, JSON.stringify(slRes));
+                // 取消舊的止盈止損單
+                if (currentTpSlOrderId) {
+                    const cancelRes = await bitunix.cancelTpSl(symbol, currentTpSlOrderId);
+                    console.log(`🗑️ 取消舊單 ${currentTpSlOrderId}: ${cancelRes.code === 0 ? '成功' : '失敗'}`);
                 }
 
-                // 2. 掛止盈二（剩餘 20%）
+                // 掛止盈二 + 止損（開倉價）
                 if (posInfo?.tp2Price) {
                     const tp2Res = await bitunix.placeTpSl(
                         symbol, positionId,
-                        posInfo.tp2Price, posInfo.remainQty,
-                        entryPrice, posInfo.remainQty
+                        posInfo.tp2Price, tp2Qty,
+                        entryPrice, currentQty
                     );
                     if (tp2Res.code === 0) {
-                        console.log(`✅ 止盈二掛出成功！止盈二=${posInfo.tp2Price}(${posInfo.remainQty}顆/20%)`);
+                        currentTpSlOrderId = tp2Res.data?.orderId;
+                        console.log(`✅ 止盈二+止損掛出: 止盈二=${posInfo.tp2Price}(${tp2Qty}顆) | 止損=${entryPrice}(開倉價)`);
+                        activePositions.set(positionId, { ...posInfo, tp3Qty });
                     } else {
                         console.error('❌ 止盈二掛單失敗:', JSON.stringify(tp2Res));
                     }
-                } else {
-                    console.log(`⚠️ 無止盈二資料，剩餘倉位僅靠止損保本`);
                 }
-
-                activePositions.delete(positionId);
-                clearInterval(interval);
             }
+
+            // ===== 止盈二成交（數量剩約 4%）=====
+            else if (phase === 2) {
+                const updatedInfo = activePositions.get(positionId);
+                if (updatedInfo?.tp3Qty && currentQty <= updatedInfo.tp3Qty * 1.1) {
+                    console.log(`🎯 ${symbol} 止盈二成交！`);
+                    phase = 3;
+
+                    // 取消舊的止盈止損單
+                    if (currentTpSlOrderId) {
+                        const cancelRes = await bitunix.cancelTpSl(symbol, currentTpSlOrderId);
+                        console.log(`🗑️ 取消舊單 ${currentTpSlOrderId}: ${cancelRes.code === 0 ? '成功' : '失敗'}`);
+                    }
+
+                    // 掛止盈三 + 止損（止盈一價格）
+                    if (posInfo?.tp3Price) {
+                        const tp3Res = await bitunix.placeTpSl(
+                            symbol, positionId,
+                            posInfo.tp3Price, currentQty,
+                            posInfo.tp1Price, currentQty
+                        );
+                        if (tp3Res.code === 0) {
+                            currentTpSlOrderId = tp3Res.data?.orderId;
+                            console.log(`✅ 止盈三+止損掛出: 止盈三=${posInfo.tp3Price}(全剩) | 止損=${posInfo.tp1Price}(止盈一價)`);
+                        } else {
+                            console.error('❌ 止盈三掛單失敗:', JSON.stringify(tp3Res));
+                        }
+                    }
+
+                    activePositions.delete(positionId);
+                    clearInterval(interval);
+                }
+            }
+
         } catch (err) {
             console.error('❌ 倉位監控錯誤:', err.message);
         }
@@ -115,6 +149,7 @@ async function executeOrder(messageText) {
     const stopLossMatch    = messageText.match(/建議停損[：:]([\d\.]+)/);
     const takeProfit1Match = messageText.match(/建議停利一[：:]([\d\.]+)/);
     const takeProfit2Match = messageText.match(/建議停利二[：:]([\d\.]+)/);
+    const takeProfit3Match = messageText.match(/建議停利三[：:]([\d\.]+)/);
 
     console.log(`🔎 幣種: ${coinMatch?.[1] || '未找到'}`);
     console.log(`🔎 方向: ${dirMatch?.[1] || '未找到'}`);
@@ -122,6 +157,7 @@ async function executeOrder(messageText) {
     console.log(`🔎 停損: ${stopLossMatch?.[1] || '未找到'}`);
     console.log(`🔎 停利一: ${takeProfit1Match?.[1] || '未找到'}`);
     console.log(`🔎 停利二: ${takeProfit2Match?.[1] || '未找到'}`);
+    console.log(`🔎 停利三: ${takeProfit3Match?.[1] || '未找到'}`);
 
     if (!coinMatch || !dirMatch || !entryPriceMatch || !stopLossMatch || !takeProfit1Match) {
         console.log('⚠️ 格式不符，略過此訊號');
@@ -135,6 +171,7 @@ async function executeOrder(messageText) {
     const stopLoss   = parseFloat(stopLossMatch[1]);
     const tp1Price   = parseFloat(takeProfit1Match[1]);
     const tp2Price   = takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null;
+    const tp3Price   = takeProfit3Match ? parseFloat(takeProfit3Match[1]) : null;
 
     // 同幣種同方向才略過
     const sameSidePosition = [...activePositions.values()].find(
@@ -145,14 +182,12 @@ async function executeOrder(messageText) {
         return;
     }
 
-    // 計算停損幅度
     const slPercent = Math.abs((stopLoss - entryPrice) / entryPrice) * 100;
     console.log(`📏 停損幅度: ${slPercent.toFixed(2)}%`);
 
     const riskRatio = slPercent >= 8 ? 0.03 : 0.05;
     console.log(`💼 倉位比例: ${riskRatio * 100}% (${slPercent >= 8 ? '停損過大，降低倉位' : '正常倉位'})`);
 
-    // 取得餘額
     let totalBalance = 100;
     try {
         const account = await bitunix.getAccount();
@@ -172,8 +207,8 @@ async function executeOrder(messageText) {
     const remainQty = totalQty - tp1Qty;
 
     console.log(`🤖 作戰計畫: ${isShort ? '做空' : '做多'} ${symbol}`);
-    console.log(`📊 總數量: ${totalQty} | 止盈一平倉: ${tp1Qty} | 剩餘: ${remainQty}`);
-    console.log(`📍 止損: ${stopLoss} | 止盈一: ${tp1Price} | 止盈二: ${tp2Price || '無'}`);
+    console.log(`📊 總數量: ${totalQty} | 止盈一: ${tp1Qty}(80%) | 剩餘: ${remainQty}(20%)`);
+    console.log(`📍 止損: ${stopLoss} | 止盈一: ${tp1Price} | 止盈二: ${tp2Price || '無'} | 止盈三: ${tp3Price || '無'}`);
 
     if (!LIVE_TRADING) {
         console.log('🛡️ 【保護模式】計算完畢，未扣款。');
@@ -181,7 +216,6 @@ async function executeOrder(messageText) {
     }
 
     try {
-        // 1. 市價進場
         console.log(`💰 送出市價單...`);
         const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
         if (orderRes.code !== 0) {
@@ -190,10 +224,8 @@ async function executeOrder(messageText) {
         }
         console.log(`✅ 進場成功！orderId=${orderRes.data.orderId}`);
 
-        // 2. 等待成交，取得倉位資訊
         await new Promise(r => setTimeout(r, 2000));
         const positions = await bitunix.getPendingPositions(symbol);
-        console.log(`🔍 倉位查詢結果:`, JSON.stringify(positions?.data));
         const pos = positions?.data?.find(p => p.symbol === symbol);
         if (!pos) {
             console.error('❌ 找不到倉位資訊');
@@ -203,27 +235,26 @@ async function executeOrder(messageText) {
         const actualEntry = parseFloat(pos.avgOpenPrice || entryPrice);
         console.log(`✅ 倉位確認: positionId=${positionId} | 實際開倉價=${actualEntry}`);
 
-        // 3. 記錄倉位資訊
         activePositions.set(positionId, {
             symbol, side, entryPrice: actualEntry,
             totalQty, tp1Qty, remainQty,
-            tp1Price, tp2Price, stopLoss
+            tp1Price, tp2Price, tp3Price, stopLoss
         });
 
-        // 4. 同時掛止損（全倉）+ 止盈一（80%）
+        // 掛止盈一（80%）+ 止損（全倉）
         const tpSlRes = await bitunix.placeTpSl(
             symbol, positionId,
             tp1Price, tp1Qty,
             stopLoss, totalQty
         );
         if (tpSlRes.code === 0) {
-            console.log(`✅ 止損+止盈一掛出成功！止損=${stopLoss}(全倉) | 止盈一=${tp1Price}(${tp1Qty}顆/80%)`);
+            const initialOrderId = tpSlRes.data?.orderId;
+            console.log(`✅ 止損+止盈一掛出！止損=${stopLoss}(全倉) | 止盈一=${tp1Price}(${tp1Qty}顆/80%) | orderId=${initialOrderId}`);
+            monitorPosition(positionId, symbol, totalQty, actualEntry, initialOrderId);
         } else {
             console.error('❌ 止損+止盈一掛單失敗:', JSON.stringify(tpSlRes));
+            monitorPosition(positionId, symbol, totalQty, actualEntry, null);
         }
-
-        // 5. 啟動倉位監控
-        monitorPosition(positionId, symbol, totalQty, actualEntry);
 
     } catch (err) {
         console.error('❌ 下單流程錯誤:', err.message);
@@ -245,13 +276,11 @@ async function startBot() {
 
         console.log(`📩 收到訊息: chatId=${currentChatId}, 內容前30字=[${messageText.substring(0, 30)}]`);
 
-        // ===== 14439 快訊：存入 Redis =====
         if (currentChatId === targetChannel) {
             await saveMessage({ time: date, text: messageText });
             console.log(`⚡ 14439快訊已存入 Redis！`);
         }
 
-        // ===== 幣幣篩選：自動下單 =====
         if ((currentChatId === signalChannel || currentChatId === "8205013511") && messageText.includes("【幣幣篩選】")) {
             console.log(`🚨 偵測到幣幣篩選訊號！`);
             await executeOrder(messageText);
