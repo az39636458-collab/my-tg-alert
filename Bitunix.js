@@ -11,7 +11,6 @@ class Bitunix {
         this.ws = null;
     }
 
-    // ==================== 簽名 ====================
     sign(nonce, timestamp, queryParams = '', body = '') {
         const digest = crypto.createHash('sha256')
             .update(nonce + timestamp + this.apiKey + queryParams + body)
@@ -21,7 +20,6 @@ class Bitunix {
             .digest('hex');
     }
 
-    // ==================== REST 請求 ====================
     async request(method, path, params = {}) {
         const nonce = crypto.randomBytes(16).toString('hex').substring(0, 32);
         const timestamp = Date.now().toString();
@@ -64,12 +62,10 @@ class Bitunix {
         }
     }
 
-    // ==================== 帳戶餘額 ====================
     async getAccount() {
         return this.request('GET', '/api/v1/futures/account', { marginCoin: 'USDT' });
     }
 
-    // ==================== 市價下單 ====================
     async placeMarketOrder(symbol, side, qty) {
         return this.request('POST', '/api/v1/futures/trade/place_order', {
             symbol,
@@ -80,27 +76,27 @@ class Bitunix {
         });
     }
 
-    // ==================== 查詢持倉 ====================
     async getPendingPositions(symbol) {
         return this.request('GET', '/api/v1/futures/position/get_pending_positions', { symbol });
-    }   
-
-    // ==================== 掛止盈止損（整個倉位）====================
-    async placePositionTpSl(symbol, positionId, tpPrice, slPrice) {
-        const params = {
-            symbol,
-            positionId,
-            slPrice: slPrice.toString(),
-            slStopType: 'LAST_PRICE'
-        };
-        if (tpPrice) {
-            params.tpPrice = tpPrice.toString();
-            params.tpStopType = 'LAST_PRICE';
-        }
-        return this.request('POST', '/api/v1/futures/tpsl/position/place_order', params);
     }
 
-    // ==================== 修改止損價 ====================
+    // 同時掛止損（全倉）+ 止盈一（80% 數量）
+    async placeTpSl(symbol, positionId, tp1Price, tp1Qty, slPrice, totalQty) {
+        return this.request('POST', '/api/v1/futures/tpsl/place_order', {
+            symbol,
+            positionId,
+            tpPrice: tp1Price.toString(),
+            tpStopType: 'LAST_PRICE',
+            tpOrderType: 'MARKET',
+            tpQty: tp1Qty.toString(),
+            slPrice: slPrice.toString(),
+            slStopType: 'LAST_PRICE',
+            slOrderType: 'MARKET',
+            slQty: totalQty.toString()
+        });
+    }
+
+    // 修改止損到開倉價（止盈一成交後）
     async modifyPositionSl(symbol, positionId, newSlPrice) {
         return this.request('POST', '/api/v1/futures/tpsl/position/modify_order', {
             symbol,
@@ -110,8 +106,7 @@ class Bitunix {
         });
     }
 
-    // ==================== WebSocket 監聽訂單成交 ====================
-    startWebSocket(onTpFilled) {
+    startWebSocket(onTp1Filled) {
         const nonce = crypto.randomBytes(16).toString('hex').substring(0, 32);
         const timestamp = Math.floor(Date.now() / 1000);
         const digest = crypto.createHash('sha256')
@@ -140,7 +135,6 @@ class Bitunix {
             try {
                 const msg = JSON.parse(data.toString());
 
-                // 登入成功後訂閱訂單頻道
                 if (msg.op === 'login' && msg.code === 0) {
                     console.log('✅ Bitunix WebSocket 登入成功，訂閱訂單頻道...');
                     this.ws.send(JSON.stringify({
@@ -149,7 +143,6 @@ class Bitunix {
                     }));
                 }
 
-                // 收到訂單更新
                 if (msg.ch === 'order' && msg.data) {
                     const order = msg.data;
                     console.log(`📡 WebSocket 訂單更新: ${order.symbol} | status=${order.orderStatus} | clientId=${order.clientId}`);
@@ -158,11 +151,10 @@ class Bitunix {
                     if (order.orderStatus === 'FILLED' && order.clientId && order.clientId.startsWith('tp1_')) {
                         const positionId = order.clientId.replace('tp1_', '');
                         console.log(`🎯 止盈一成交！positionId=${positionId}`);
-                        if (onTpFilled) onTpFilled(positionId, order);
+                        if (onTp1Filled) onTp1Filled(positionId, order);
                     }
                 }
 
-                // Ping 保持連線
                 if (msg.op === 'ping') {
                     this.ws.send(JSON.stringify({ op: 'pong', pong: msg.ping }));
                 }
@@ -174,14 +166,13 @@ class Bitunix {
 
         this.ws.on('close', () => {
             console.log('⚠️ Bitunix WebSocket 斷線，5秒後重連...');
-            setTimeout(() => this.startWebSocket(onTpFilled), 5000);
+            setTimeout(() => this.startWebSocket(onTp1Filled), 5000);
         });
 
         this.ws.on('error', (err) => {
             console.error('❌ Bitunix WebSocket 錯誤:', err.message);
         });
 
-        // 每 20 秒 ping 保持連線
         setInterval(() => {
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 this.ws.send(JSON.stringify({ op: 'ping', ping: Math.floor(Date.now() / 1000) }));
