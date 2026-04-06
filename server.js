@@ -92,7 +92,7 @@ async function executeOrder(messageText) {
     const slPercent = Math.abs((stopLoss - entryPrice) / entryPrice) * 100;
     console.log(`📏 停損幅度: ${slPercent.toFixed(2)}%`);
 
-    const riskRatio = slPercent >= 8 ? 0.03 : 0.05;
+    const riskRatio = slPercent >= 8 ? 0.001 : 0.001; // 測試用極小倉位
     console.log(`💼 倉位比例: ${riskRatio * 100}% (${slPercent >= 8 ? '停損過大，降低倉位' : '正常倉位'})`);
 
     let totalBalance = 100;
