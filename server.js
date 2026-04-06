@@ -80,9 +80,13 @@ async function executeOrder(messageText) {
     const tp1Price   = parseFloat(takeProfit1Match[1]);
     const tp2Price   = takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null;
 
-    if ([...activePositions.values()].some(p => p.symbol === symbol)) {
-        console.log(`⏭️ ${symbol} 已有未平倉位，略過此訊號`);
-        return;
+    // 新版：同幣種同方向才略過
+    const sameSidePosition = [...activePositions.values()].find(
+    p => p.symbol === symbol && p.side === side
+    );
+    if (sameSidePosition) {
+    console.log(`⏭️ ${symbol} 已有相同方向倉位，略過此訊號`);
+    return;
     }
 
     const slPercent = Math.abs((stopLoss - entryPrice) / entryPrice) * 100;
