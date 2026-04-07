@@ -80,7 +80,6 @@ class Bitunix {
         return this.request('GET', '/api/v1/futures/position/get_pending_positions', { symbol });
     }
 
-    // 掛止盈止損單（可指定數量）
     async placeTpSl(symbol, positionId, tpPrice, tpQty, slPrice, slQty) {
         const params = { symbol, positionId };
         if (tpPrice) {
@@ -98,7 +97,6 @@ class Bitunix {
         return this.request('POST', '/api/v1/futures/tpsl/place_order', params);
     }
 
-    // 取消止盈止損單
     async cancelTpSl(symbol, orderId) {
         return this.request('POST', '/api/v1/futures/tpsl/cancel_order', {
             symbol,
@@ -106,7 +104,30 @@ class Bitunix {
         });
     }
 
-    // 修改倉位止損
+    // 查詢所有待成交止盈止損單
+    async getPendingTpSlOrders(symbol, positionId) {
+        return this.request('GET', '/api/v1/futures/tpsl/get_pending_orders', {
+            symbol,
+            positionId,
+            limit: 100
+        });
+    }
+
+    // 取消指定倉位的所有止盈止損單
+    async cancelAllTpSl(symbol, positionId) {
+        try {
+            const res = await this.getPendingTpSlOrders(symbol, positionId);
+            const orders = res?.data || [];
+            console.log(`🔍 找到 ${orders.length} 個待取消的止盈止損單`);
+            for (const order of orders) {
+                const cancelRes = await this.cancelTpSl(symbol, order.id);
+                console.log(`🗑️ 取消止盈止損單 ${order.id}: ${cancelRes.code === 0 ? '成功' : '失敗'}`);
+            }
+        } catch (err) {
+            console.error('❌ 取消所有止盈止損單失敗:', err.message);
+        }
+    }
+
     async modifyPositionSl(symbol, positionId, newSlPrice) {
         return this.request('POST', '/api/v1/futures/tpsl/position/modify_order', {
             symbol,

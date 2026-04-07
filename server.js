@@ -49,11 +49,10 @@ const client = new TelegramClient(new StringSession(sessionString), apiId, apiHa
 });
 
 // ==================== 倉位監控 ====================
-async function monitorPosition(positionId, symbol, originalQty, entryPrice, initialOrderId) {
+async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
     console.log(`👁️ 開始監控: ${symbol} | positionId=${positionId} | 原始數量=${originalQty}`);
 
     let phase = 1;
-    let currentTpSlOrderId = initialOrderId;
 
     const interval = setInterval(async () => {
         try {
@@ -76,14 +75,11 @@ async function monitorPosition(positionId, symbol, originalQty, entryPrice, init
                 console.log(`🎯 ${symbol} 止盈一成交！`);
                 phase = 2;
 
-                const tp2Qty = Math.floor(currentQty * 0.8); // 剩餘的 80%
-                const tp3Qty = currentQty - tp2Qty;           // 剩餘的 20%
+                const tp2Qty = Math.floor(currentQty * 0.8);
+                const tp3Qty = currentQty - tp2Qty;
 
-                // 取消舊的止盈止損單
-                if (currentTpSlOrderId) {
-                    const cancelRes = await bitunix.cancelTpSl(symbol, currentTpSlOrderId);
-                    console.log(`🗑️ 取消舊單 ${currentTpSlOrderId}: ${cancelRes.code === 0 ? '成功' : '失敗'}`);
-                }
+                // 取消所有舊的止盈止損單
+                await bitunix.cancelAllTpSl(symbol, positionId);
 
                 // 掛止盈二 + 止損（開倉價）
                 if (posInfo?.tp2Price) {
@@ -93,7 +89,6 @@ async function monitorPosition(positionId, symbol, originalQty, entryPrice, init
                         entryPrice, currentQty
                     );
                     if (tp2Res.code === 0) {
-                        currentTpSlOrderId = tp2Res.data?.orderId;
                         console.log(`✅ 止盈二+止損掛出: 止盈二=${posInfo.tp2Price}(${tp2Qty}顆) | 止損=${entryPrice}(開倉價)`);
                         activePositions.set(positionId, { ...posInfo, tp3Qty });
                     } else {
@@ -109,11 +104,8 @@ async function monitorPosition(positionId, symbol, originalQty, entryPrice, init
                     console.log(`🎯 ${symbol} 止盈二成交！`);
                     phase = 3;
 
-                    // 取消舊的止盈止損單
-                    if (currentTpSlOrderId) {
-                        const cancelRes = await bitunix.cancelTpSl(symbol, currentTpSlOrderId);
-                        console.log(`🗑️ 取消舊單 ${currentTpSlOrderId}: ${cancelRes.code === 0 ? '成功' : '失敗'}`);
-                    }
+                    // 取消所有舊的止盈止損單
+                    await bitunix.cancelAllTpSl(symbol, positionId);
 
                     // 掛止盈三 + 止損（止盈一價格）
                     if (posInfo?.tp3Price) {
@@ -123,7 +115,6 @@ async function monitorPosition(positionId, symbol, originalQty, entryPrice, init
                             posInfo.tp1Price, currentQty
                         );
                         if (tp3Res.code === 0) {
-                            currentTpSlOrderId = tp3Res.data?.orderId;
                             console.log(`✅ 止盈三+止損掛出: 止盈三=${posInfo.tp3Price}(全剩) | 止損=${posInfo.tp1Price}(止盈一價)`);
                         } else {
                             console.error('❌ 止盈三掛單失敗:', JSON.stringify(tp3Res));
@@ -173,7 +164,6 @@ async function executeOrder(messageText) {
     const tp2Price   = takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null;
     const tp3Price   = takeProfit3Match ? parseFloat(takeProfit3Match[1]) : null;
 
-    // 同幣種同方向才略過
     const sameSidePosition = [...activePositions.values()].find(
         p => p.symbol === symbol && p.side === side
     );
@@ -241,20 +231,18 @@ async function executeOrder(messageText) {
             tp1Price, tp2Price, tp3Price, stopLoss
         });
 
-        // 掛止盈一（80%）+ 止損（全倉）
         const tpSlRes = await bitunix.placeTpSl(
             symbol, positionId,
             tp1Price, tp1Qty,
             stopLoss, totalQty
         );
         if (tpSlRes.code === 0) {
-            const initialOrderId = tpSlRes.data?.orderId;
-            console.log(`✅ 止損+止盈一掛出！止損=${stopLoss}(全倉) | 止盈一=${tp1Price}(${tp1Qty}顆/80%) | orderId=${initialOrderId}`);
-            monitorPosition(positionId, symbol, totalQty, actualEntry, initialOrderId);
+            console.log(`✅ 止損+止盈一掛出！止損=${stopLoss}(全倉) | 止盈一=${tp1Price}(${tp1Qty}顆/80%)`);
         } else {
             console.error('❌ 止損+止盈一掛單失敗:', JSON.stringify(tpSlRes));
-            monitorPosition(positionId, symbol, totalQty, actualEntry, null);
         }
+
+        monitorPosition(positionId, symbol, totalQty, actualEntry);
 
     } catch (err) {
         console.error('❌ 下單流程錯誤:', err.message);
