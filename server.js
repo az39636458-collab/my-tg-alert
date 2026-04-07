@@ -89,15 +89,16 @@ async function recoverPositions() {
     }
 }
 
-// ==================== 自動下單流程 (儀表板回歸版) ====================
+// ==================== 自動下單流程 (固定保證金版) ====================
 async function executeOrder(messageText) {
     const coinMatch = messageText.match(/([A-Z0-9]+USDT)/);
     const dirMatch = messageText.match(/方向[：:\s]*(多|空)/);
     const entryPriceMatch = messageText.match(/收盤價[：:]([\d\.]+)/);
     const stopLossMatch = messageText.match(/建議停損[：:]([\d\.]+)/);
     const takeProfit1Match = messageText.match(/建議停利一[：:]([\d\.]+)/);
-    const takeProfit2Match = messageText.match(/建議停利二[：:]([\d\.]+)/);
-    const takeProfit3Match = messageText.match(/建議停利三[：:]([\d\.]+)/);
+    // 支援簡繁體的建議停利
+    const takeProfit2Match = messageText.match(/建议停利二[：:]([\d\.]+)/) || messageText.match(/建議停利二[：:]([\d\.]+)/);
+    const takeProfit3Match = messageText.match(/建议停利三[：:]([\d\.]+)/) || messageText.match(/建議停利三[：:]([\d\.]+)/);
 
     if (!coinMatch || !dirMatch || !entryPriceMatch || !stopLossMatch || !takeProfit1Match) return;
 
@@ -114,26 +115,22 @@ async function executeOrder(messageText) {
         return;
     }
 
-    // 🚀 獲取真實餘額並印出
-    let totalBalance = 100;
-    try {
-        const account = await bitunix.getAccount();
-        if (account?.data?.available) {
-            totalBalance = parseFloat(account.data.available);
-            console.log(`✅ 真實餘額: ${totalBalance} USDT`); // 回歸！
-        }
-    } catch (e) {}
-
-    // 🚀 印出作戰計畫
-    console.log(`🤖 作戰計畫: 做${sideText} ${symbol}`); // 回歸！
-
+    // ================= 固定美金與槓桿邏輯 =================
     const slPercent = Math.abs((stopLoss - entryPrice) / entryPrice) * 100;
-    const riskRatio = slPercent >= 8 ? 0.03 : 0.05; 
+    
+    // 判斷要用的美金 (大於等於 8% 用 8 美金，否則用 10 美金)
+    const margin = slPercent >= 8 ? 8 : 10; 
     const leverage = 20; 
-    const totalQty = Math.floor((totalBalance * riskRatio * leverage) / entryPrice);
+    
+    // 計算下單的真實數量
+    const totalQty = Math.floor((margin * leverage) / entryPrice);
     const tp1Qty = Math.floor(totalQty * 0.8);
 
-    if (totalQty <= 0) return console.log("⚠️ 餘額不足");
+    // 🚀 印出專屬你的作戰儀表板
+    console.log(`📊 停損幅度: ${slPercent.toFixed(2)}% | 決定使用保證金: ${margin} USDT`);
+    console.log(`🤖 作戰計畫: 做${sideText} ${symbol} | 總數量: ${totalQty} 顆`);
+
+    if (totalQty <= 0) return console.log("⚠️ 計算出的數量小於 0，無法開倉");
 
     try {
         const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
