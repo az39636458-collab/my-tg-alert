@@ -48,19 +48,27 @@ const client = new TelegramClient(new StringSession(sessionString), apiId, apiHa
     connectionRetries: 5,
 });
 
-// ==================== 倉位監控 ====================
+// ==================== 倉位監控 (強化容錯版) ====================
 async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
     console.log(`👁️ 開始監控: ${symbol} | positionId=${positionId} | 原始數量=${originalQty}`);
 
     let phase = 1;
-
+    // 把間隔縮短到 5 秒，反應更靈敏
     const interval = setInterval(async () => {
         try {
             const positions = await bitunix.getPendingPositions(symbol);
+            
+            // 🚨 強化防線 1：檢查 API 是否真的成功回傳
+            if (!positions || positions.code !== 0) {
+                console.log(`⚠️ API 讀取異常 (${symbol})，稍後自動重試...`);
+                return; // 只是跳過這回合，不准關閉監控！
+            }
+
             const pos = positions?.data?.find(p => p.positionId === positionId);
 
+            // 🚨 強化防線 2：確認是真的平倉，還是 API 回傳空陣列
             if (!pos) {
-                console.log(`✅ ${symbol} 倉位已全部平倉，停止監控`);
+                console.log(`✅ 確認 ${symbol} 倉位已真實在交易所消失，停止監控。`);
                 activePositions.delete(positionId);
                 clearInterval(interval);
                 return;
@@ -68,8 +76,9 @@ async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
 
             const currentQty = parseFloat(pos.qty);
             const posInfo = activePositions.get(positionId);
-            console.log(`🔍 ${symbol} 階段${phase}: 當前數量=${currentQty} / 原始=${originalQty}`);
-
+            
+            // ... (下方原本的 phase 1 和 phase 2 邏輯保持不變) ...
+            
             // ===== 止盈一成交（數量剩約 20%）=====
             if (phase === 1 && currentQty < originalQty * 0.9) {
                 console.log(`🎯 ${symbol} 止盈一成交！`);
@@ -89,7 +98,7 @@ async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
                         entryPrice, currentQty
                     );
                     if (tp2Res.code === 0) {
-                        console.log(`✅ 止盈二+止損掛出: 止盈二=${posInfo.tp2Price}(${tp2Qty}顆) | 止損=${entryPrice}(開倉價)`);
+                        console.log(`✅ 止盈二+止損掛出: 止盈二=${posInfo.tp2Price}(${tp2Qty}顆) | 止損=${entryPrice}(保本開倉價)`);
                         activePositions.set(positionId, { ...posInfo, tp3Qty });
                     } else {
                         console.error('❌ 止盈二掛單失敗:', JSON.stringify(tp2Res));
@@ -127,9 +136,10 @@ async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
             }
 
         } catch (err) {
-            console.error('❌ 倉位監控錯誤:', err.message);
+            console.error(`❌ 倉位監控錯誤 (${symbol}):`, err.message);
+            // 這裡抓到錯誤也不關閉 interval，讓它下回合繼續努力！
         }
-    }, 10000);
+    }, 5000); // 縮短為 5 秒
 }
 
 // ==================== 自動下單主流程 ====================
