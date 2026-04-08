@@ -33,47 +33,21 @@ const activePositions = new Map();
 async function monitorPosition(positionId, symbol, originalQty, entryPrice) {
     const interval = setInterval(async () => {
         try {
-            const posInfo = activePositions.get(positionId);
-            if (!posInfo) { clearInterval(interval); return; }
-
+            // 因為現在是 TP1 全平，所以只要倉位消失，就代表止盈或止損了
             const positions = await bitunix.getPendingPositions(symbol);
             if (!positions || positions.code !== 0) return;
 
             const pos = positions?.data?.find(p => p.positionId === positionId);
             if (!pos) {
-                console.log(`✅ ${symbol} 倉位已消失，監控結束。`);
+                console.log(`✅ ${symbol} 倉位已消失 (已全數止盈或止損)，結束監控。`);
                 activePositions.delete(positionId);
                 await redis.hdel(POSITIONS_KEY, positionId);
                 clearInterval(interval);
                 return;
             }
 
-            const currentQty = parseFloat(pos.qty);
-            console.log(`🔍 ${symbol} 階段${posInfo.phase}: 數量=${currentQty}/${originalQty}`);
-
-            // 止盈一成交邏輯
-            if (posInfo.phase === 1 && currentQty < originalQty * 0.9) {
-                console.log(`🎯 ${symbol} 止盈一成交！執行保本止損...`);
-                posInfo.phase = 2;
-                await bitunix.cancelAllTpSl(symbol, positionId);
-                const tp2Qty = Math.floor(currentQty * 0.8);
-                const tp3Qty = currentQty - tp2Qty;
-                if (posInfo.tp2Price) {
-                    await bitunix.placeTpSl(symbol, positionId, posInfo.tp2Price, tp2Qty, entryPrice, currentQty);
-                    posInfo.tp3Qty = tp3Qty;
-                    await redis.hset(POSITIONS_KEY, positionId, JSON.stringify(posInfo));
-                }
-            }
-            // 止盈二成交邏輯
-            else if (posInfo.phase === 2 && posInfo.tp3Qty && currentQty <= posInfo.tp3Qty * 1.1) {
-                console.log(`🎯 ${symbol} 止盈二成交！`);
-                posInfo.phase = 3;
-                await bitunix.cancelAllTpSl(symbol, positionId);
-                if (posInfo.tp3Price) {
-                    await bitunix.placeTpSl(symbol, positionId, posInfo.tp3Price, currentQty, posInfo.tp1Price, currentQty);
-                    await redis.hset(POSITIONS_KEY, positionId, JSON.stringify(posInfo));
-                }
-            }
+            console.log(`🔍 ${symbol} 監控中: 目前數量=${pos.qty}/${originalQty}`);
+            
         } catch (err) { console.error(`❌ 監控異常:`, err.message); }
     }, 5000);
 }
@@ -85,20 +59,17 @@ async function recoverPositions() {
         const info = JSON.parse(data);
         activePositions.set(posId, info);
         monitorPosition(posId, info.symbol, info.totalQty, info.entryPrice);
-        console.log(`♻️ 已恢復監控: ${info.symbol} (Phase ${info.phase})`);
+        console.log(`♻️ 已恢復監控: ${info.symbol}`);
     }
 }
 
-// ==================== 自動下單流程 (固定保證金版) ====================
+// ==================== 自動下單流程 (極簡防禦版) ====================
 async function executeOrder(messageText) {
     const coinMatch = messageText.match(/([A-Z0-9]+USDT)/);
     const dirMatch = messageText.match(/方向[：:\s]*(多|空)/);
     const entryPriceMatch = messageText.match(/收盤價[：:]([\d\.]+)/);
     const stopLossMatch = messageText.match(/建議停損[：:]([\d\.]+)/);
     const takeProfit1Match = messageText.match(/建議停利一[：:]([\d\.]+)/);
-    // 支援簡繁體的建議停利
-    const takeProfit2Match = messageText.match(/建议停利二[：:]([\d\.]+)/) || messageText.match(/建議停利二[：:]([\d\.]+)/);
-    const takeProfit3Match = messageText.match(/建议停利三[：:]([\d\.]+)/) || messageText.match(/建議停利三[：:]([\d\.]+)/);
 
     if (!coinMatch || !dirMatch || !entryPriceMatch || !stopLossMatch || !takeProfit1Match) return;
 
@@ -106,7 +77,8 @@ async function executeOrder(messageText) {
     const sideText = dirMatch[1];
     const side = sideText === '空' ? 'SELL' : 'BUY';
     const entryPrice = parseFloat(entryPriceMatch[1]);
-    const stopLoss = parseFloat(stopLossMatch[1]);
+    const stopLoss = parseFloat(stopLossMatch[1]); // 直接照快訊的停損
+    const tp1Price = parseFloat(takeProfit1Match[1]);
 
     // 🚀 一幣不兩投
     const hasPosition = [...activePositions.values()].some(p => p.symbol === symbol && p.side === side);
@@ -115,22 +87,22 @@ async function executeOrder(messageText) {
         return;
     }
 
-    // ================= 固定美金與槓桿邏輯 =================
-    const slPercent = Math.abs((stopLoss - entryPrice) / entryPrice) * 100;
+    // ================= 💰 核心策略：固定 5U，全平 TP1 =================
+    const margin = 5;       // 固定 5 USDT
+    const leverage = 20;    // 20 倍槓桿
     
-    // 判斷要用的美金 (大於等於 8% 用 8 美金，否則用 10 美金)
-    const margin = slPercent >= 8 ? 8 : 10; 
-    const leverage = 20; 
-    
-    // 計算下單的真實數量
+    // 計算下單數量
     const totalQty = Math.floor((margin * leverage) / entryPrice);
-    const tp1Qty = Math.floor(totalQty * 0.8);
+    
+    // 🎯 關鍵修改：TP1 的數量 = 總數量 (打到 TP1 直接 100% 平倉)
+    const tp1Qty = totalQty; 
 
-    // 🚀 印出專屬你的作戰儀表板
-    console.log(`📊 停損幅度: ${slPercent.toFixed(2)}% | 決定使用保證金: ${margin} USDT`);
+    console.log(`-----------------------------------`);
+    console.log(`🛡️ 啟動極簡防禦: 固定 ${margin}U | 停損照舊 | 打到 TP1 全平`);
     console.log(`🤖 作戰計畫: 做${sideText} ${symbol} | 總數量: ${totalQty} 顆`);
+    console.log(`-----------------------------------`);
 
-    if (totalQty <= 0) return console.log("⚠️ 計算出的數量小於 0，無法開倉");
+    if (totalQty <= 0) return console.log("⚠️ 價格過高，5U 無法買入 1 顆，略過開倉");
 
     try {
         const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
@@ -144,15 +116,13 @@ async function executeOrder(messageText) {
         const posData = {
             symbol, side, entryPrice: parseFloat(pos.avgOpenPrice),
             totalQty, tp1Qty, 
-            tp1Price: parseFloat(takeProfit1Match[1]),
-            tp2Price: takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null,
-            tp3Price: takeProfit3Match ? parseFloat(takeProfit3Match[1]) : null,
-            stopLoss, phase: 1
+            tp1Price, stopLoss, phase: 1
         };
 
         activePositions.set(pos.positionId, posData);
         await redis.hset(POSITIONS_KEY, pos.positionId, JSON.stringify(posData));
 
+        // 掛出 TP1 (100% 數量) 與 StopLoss
         await bitunix.placeTpSl(symbol, pos.positionId, posData.tp1Price, tp1Qty, posData.stopLoss, totalQty);
         monitorPosition(pos.positionId, symbol, totalQty, posData.entryPrice);
         console.log(`✅ ${symbol} 下單與監控啟動！`);
