@@ -55,11 +55,18 @@ async function monitorPosition(positionId, symbol, originalQty) {
 
 // ==================== 自動下單流程 (職業風控 + 延遲進場) ====================
 async function executeOrder(messageText, receiveTime) {
+    // 🔍 升級版 Regex：把所有隱藏數據都抓出來！
     const coinMatch = messageText.match(/([A-Z0-9]+USDT)/);
     const dirMatch = messageText.match(/方向[：:\s]*(多|空)/);
     const entryPriceMatch = messageText.match(/收盤價[：:]([\d\.]+)/);
     const stopLossMatch = messageText.match(/建議停損[：:]([\d\.]+)/);
     const takeProfit1Match = messageText.match(/建議停利一[：:]([\d\.]+)/);
+    
+    // 新增抓取邏輯
+    const triggerMatch = messageText.match(/觸發次數[：:]([\d]+)/);
+    const takeProfit2Match = messageText.match(/建議停利二[：:]([\d\.]+)/);
+    const takeProfit3Match = messageText.match(/建議停利三[：:]([\d\.]+)/);
+    const keyPriceMatch = messageText.match(/關鍵價格[：:](.+)/);
 
     if (!coinMatch || !dirMatch || !entryPriceMatch || !stopLossMatch || !takeProfit1Match) return;
 
@@ -70,8 +77,20 @@ async function executeOrder(messageText, receiveTime) {
     const stopLoss = parseFloat(stopLossMatch[1]);
     const tp1Price = parseFloat(takeProfit1Match[1]);
 
-    // 📝 寫入歷史紀錄 (準備給側邊欄)
-    const newSignal = { symbol, sideText, signalPrice, stopLoss, tp1Price, time: receiveTime, status: '等待開盤' };
+    // 處理新增的變數（如果有抓到就存數字，沒抓到就存 null 或字串）
+    const triggerCount = triggerMatch ? triggerMatch[1] : "-";
+    const tp2Price = takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null;
+    const tp3Price = takeProfit3Match ? parseFloat(takeProfit3Match[1]) : null;
+    const keyPrices = keyPriceMatch ? keyPriceMatch[1].trim() : "-";
+
+    // 📝 寫入歷史紀錄 (擴充版，新增 actualEntryPrice 用來記錄真實成交價)
+    const newSignal = { 
+        symbol, sideText, signalPrice, stopLoss, tp1Price, 
+        tp2Price, tp3Price, triggerCount, keyPrices, 
+        actualEntryPrice: null, // 先留空，等下單成功後填入
+        time: receiveTime, status: '等待開盤' 
+    };
+    
     signalHistory.unshift(newSignal);
     if (signalHistory.length > 50) signalHistory.pop();
     await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
@@ -81,30 +100,22 @@ async function executeOrder(messageText, receiveTime) {
         return console.log(`⏭️ ${symbol} 已有倉位，略過。`);
     }
 
-    // ⏳ 延遲進場：等待下一個 1m 開盤
     const now = new Date();
     const msToNextMinute = 60000 - (now.getSeconds() * 1000) - now.getMilliseconds();
     console.log(`⏳ ${symbol} 訊號已確認，${Math.floor(msToNextMinute/1000)} 秒後於下一根 1m 開盤進場...`);
 
     setTimeout(async () => {
         try {
-            // 🛑 移除了會報錯的 getTicker，直接用快訊的價格來計算買的數量
             const currentEntryPrice = signalPrice;
-
-            // 🎯 職業風控核心：無論停損多遠，固定只賠 5 USDT
             const slPercent = Math.abs((stopLoss - currentEntryPrice) / currentEntryPrice);
-            
-            // 公式：總倉位(價值) = 固定風險金額(5U) / 停損百分比
             let targetValue = 5 / slPercent;
-            
-            // 安全限制：總倉位價值最高不超過 200U (防止極端近距離停損導致爆倉)
             if (targetValue > 200) targetValue = 200;
 
-            const leverage = 20; 
             const totalQty = Math.floor(targetValue / currentEntryPrice);
 
             if (totalQty <= 0) {
-                newSignal.status = '數量為0略過';
+                newSignal.status = '數量太少失敗';
+                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); // 更新狀態
                 return console.log("⚠️ 價格過高或計算數量為0，略過");
             }
 
@@ -112,7 +123,8 @@ async function executeOrder(messageText, receiveTime) {
             
             const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
             if (orderRes.code !== 0) {
-                newSignal.status = '下單失敗';
+                newSignal.status = '交易所拒絕';
+                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); // 更新狀態
                 return console.error(`❌ 下單失敗:`, orderRes.msg);
             }
 
@@ -121,18 +133,21 @@ async function executeOrder(messageText, receiveTime) {
             const pos = positions?.data?.find(p => p.symbol === symbol);
             if (!pos) return;
 
-            // 這裡會抓到真正進場的「1m開盤價」！
-            const posData = { symbol, side, entryPrice: parseFloat(pos.avgOpenPrice), totalQty, tp1Price, stopLoss, time: new Date().toLocaleString() };
+            const actualEntry = parseFloat(pos.avgOpenPrice);
+
+            const posData = { symbol, side, entryPrice: actualEntry, totalQty, tp1Price, stopLoss, time: new Date().toLocaleString() };
             activePositions.set(pos.positionId, posData);
             await redis.hset(POSITIONS_KEY, pos.positionId, JSON.stringify(posData));
 
-            // 打到 TP1 直接 100% 全平
             await bitunix.placeTpSl(symbol, pos.positionId, tp1Price, totalQty, stopLoss, totalQty);
             monitorPosition(pos.positionId, symbol, totalQty);
             
+            // 🎯 最重要的一步：把「真實成交價」寫回歷史紀錄，並更新狀態！
+            newSignal.actualEntryPrice = actualEntry;
             newSignal.status = '監控中';
             await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
-            console.log(`✅ ${symbol} 執行成功！實際進場均價: ${posData.entryPrice}`);
+            
+            console.log(`✅ ${symbol} 執行成功！實際進場均價: ${actualEntry}`);
 
         } catch (err) { console.error('❌ 執行出錯:', err.message); }
     }, msToNextMinute);
@@ -144,7 +159,6 @@ async function startBot() {
     await client.connect();
     console.log("✅ Telegram 連線成功");
     
-    // 恢復數據
     const savedPos = await redis.hgetall(POSITIONS_KEY);
     for (const [id, data] of Object.entries(savedPos)) {
         const info = JSON.parse(data);
