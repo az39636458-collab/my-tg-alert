@@ -31,12 +31,12 @@ let signalHistory = [];
 
 // ==================== 網頁儀表板專用 API ====================
 app.get('/api/history', (req, res) => res.json(signalHistory));
-app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));// 新增：請 MEXC 幫忙抓 K 線的中繼站 (代購)
+app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));
+
 // 新增：請 MEXC 幫忙抓 K 線的中繼站 (支援動態時間切換)
 app.get('/api/klines/:symbol', async (req, res) => {
     try {
         const symbol = req.params.symbol;
-        // 接收網頁傳來的時間，如果沒傳，預設就給 15m
         const interval = req.query.interval || '15m'; 
         const response = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=100`);
         const data = await response.json();
@@ -59,6 +59,14 @@ async function monitorPosition(positionId, symbol, originalQty) {
                 console.log(`✅ ${symbol} 倉位已消失 (已全平止盈或停損)`);
                 activePositions.delete(positionId);
                 await redis.hdel(POSITIONS_KEY, positionId);
+                
+                // 🎯 狀態更新：去歷史紀錄裡找出這筆單，把狀態從「監控中」改成「已平倉」
+                const signal = signalHistory.find(s => s.symbol === symbol && s.status === '監控中');
+                if (signal) {
+                    signal.status = '已平倉';
+                    await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
+                }
+
                 clearInterval(interval);
                 return;
             }
@@ -69,14 +77,12 @@ async function monitorPosition(positionId, symbol, originalQty) {
 
 // ==================== 自動下單流程 (職業風控 + 延遲進場) ====================
 async function executeOrder(messageText, receiveTime) {
-    // 🔍 升級版 Regex：把所有隱藏數據都抓出來！
     const coinMatch = messageText.match(/([A-Z0-9]+USDT)/);
     const dirMatch = messageText.match(/方向[：:\s]*(多|空)/);
     const entryPriceMatch = messageText.match(/收盤價[：:]([\d\.]+)/);
     const stopLossMatch = messageText.match(/建議停損[：:]([\d\.]+)/);
     const takeProfit1Match = messageText.match(/建議停利一[：:]([\d\.]+)/);
     
-    // 新增抓取邏輯
     const triggerMatch = messageText.match(/觸發次數[：:]([\d]+)/);
     const takeProfit2Match = messageText.match(/建議停利二[：:]([\d\.]+)/);
     const takeProfit3Match = messageText.match(/建議停利三[：:]([\d\.]+)/);
@@ -91,17 +97,15 @@ async function executeOrder(messageText, receiveTime) {
     const stopLoss = parseFloat(stopLossMatch[1]);
     const tp1Price = parseFloat(takeProfit1Match[1]);
 
-    // 處理新增的變數（如果有抓到就存數字，沒抓到就存 null 或字串）
     const triggerCount = triggerMatch ? triggerMatch[1] : "-";
     const tp2Price = takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null;
     const tp3Price = takeProfit3Match ? parseFloat(takeProfit3Match[1]) : null;
     const keyPrices = keyPriceMatch ? keyPriceMatch[1].trim() : "-";
 
-    // 📝 寫入歷史紀錄 (擴充版，新增 actualEntryPrice 用來記錄真實成交價)
     const newSignal = { 
         symbol, sideText, signalPrice, stopLoss, tp1Price, 
         tp2Price, tp3Price, triggerCount, keyPrices, 
-        actualEntryPrice: null, // 先留空，等下單成功後填入
+        actualEntryPrice: null, 
         time: receiveTime, status: '等待開盤' 
     };
     
@@ -111,6 +115,7 @@ async function executeOrder(messageText, receiveTime) {
 
     if ([...activePositions.values()].some(p => p.symbol === symbol && p.side === side)) {
         newSignal.status = '略過(已有單)';
+        await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
         return console.log(`⏭️ ${symbol} 已有倉位，略過。`);
     }
 
@@ -128,8 +133,8 @@ async function executeOrder(messageText, receiveTime) {
             const totalQty = Math.floor(targetValue / currentEntryPrice);
 
             if (totalQty <= 0) {
-                newSignal.status = '數量太少失敗';
-                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); // 更新狀態
+                newSignal.status = '數量為0略過';
+                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); 
                 return console.log("⚠️ 價格過高或計算數量為0，略過");
             }
 
@@ -137,8 +142,8 @@ async function executeOrder(messageText, receiveTime) {
             
             const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
             if (orderRes.code !== 0) {
-                newSignal.status = '交易所拒絕';
-                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); // 更新狀態
+                newSignal.status = '下單失敗';
+                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); 
                 return console.error(`❌ 下單失敗:`, orderRes.msg);
             }
 
@@ -156,7 +161,6 @@ async function executeOrder(messageText, receiveTime) {
             await bitunix.placeTpSl(symbol, pos.positionId, tp1Price, totalQty, stopLoss, totalQty);
             monitorPosition(pos.positionId, symbol, totalQty);
             
-            // 🎯 最重要的一步：把「真實成交價」寫回歷史紀錄，並更新狀態！
             newSignal.actualEntryPrice = actualEntry;
             newSignal.status = '監控中';
             await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
