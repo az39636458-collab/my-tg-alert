@@ -88,8 +88,8 @@ async function executeOrder(messageText, receiveTime) {
 
     setTimeout(async () => {
         try {
-            const ticker = await bitunix.getTicker(symbol);
-            const currentEntryPrice = parseFloat(ticker.data.last);
+            // 🛑 移除了會報錯的 getTicker，直接用快訊的價格來計算買的數量
+            const currentEntryPrice = signalPrice;
 
             // 🎯 職業風控核心：無論停損多遠，固定只賠 5 USDT
             const slPercent = Math.abs((stopLoss - currentEntryPrice) / currentEntryPrice);
@@ -103,18 +103,25 @@ async function executeOrder(messageText, receiveTime) {
             const leverage = 20; 
             const totalQty = Math.floor(targetValue / currentEntryPrice);
 
-            if (totalQty <= 0) return console.log("⚠️ 價格過高或計算數量為0，略過");
+            if (totalQty <= 0) {
+                newSignal.status = '數量為0略過';
+                return console.log("⚠️ 價格過高或計算數量為0，略過");
+            }
 
             console.log(`🚀 1m 開盤進場！${symbol} | 停損距離: ${(slPercent*100).toFixed(2)}% | 預計虧損: 5U`);
             
             const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
-            if (orderRes.code !== 0) return console.error(`❌ 下單失敗:`, orderRes.msg);
+            if (orderRes.code !== 0) {
+                newSignal.status = '下單失敗';
+                return console.error(`❌ 下單失敗:`, orderRes.msg);
+            }
 
             await new Promise(r => setTimeout(r, 2000));
             const positions = await bitunix.getPendingPositions(symbol);
             const pos = positions?.data?.find(p => p.symbol === symbol);
             if (!pos) return;
 
+            // 這裡會抓到真正進場的「1m開盤價」！
             const posData = { symbol, side, entryPrice: parseFloat(pos.avgOpenPrice), totalQty, tp1Price, stopLoss, time: new Date().toLocaleString() };
             activePositions.set(pos.positionId, posData);
             await redis.hset(POSITIONS_KEY, pos.positionId, JSON.stringify(posData));
@@ -125,7 +132,7 @@ async function executeOrder(messageText, receiveTime) {
             
             newSignal.status = '監控中';
             await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
-            console.log(`✅ ${symbol} 執行成功！`);
+            console.log(`✅ ${symbol} 執行成功！實際進場均價: ${posData.entryPrice}`);
 
         } catch (err) { console.error('❌ 執行出錯:', err.message); }
     }, msToNextMinute);
