@@ -33,7 +33,7 @@ let signalHistory = [];
 app.get('/api/history', (req, res) => res.json(signalHistory));
 app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));
 
-// 新增：請 MEXC 幫忙抓 K 線的中繼站 (支援動態時間切換)
+// 請 MEXC 幫忙抓 K 線的中繼站
 app.get('/api/klines/:symbol', async (req, res) => {
     try {
         const symbol = req.params.symbol;
@@ -47,7 +47,7 @@ app.get('/api/klines/:symbol', async (req, res) => {
     }
 });
 
-// ==================== 倉位監控邏輯 (打到 TP1 即全平) ====================
+// ==================== 倉位監控邏輯 ====================
 async function monitorPosition(positionId, symbol, originalQty) {
     const interval = setInterval(async () => {
         try {
@@ -60,7 +60,6 @@ async function monitorPosition(positionId, symbol, originalQty) {
                 activePositions.delete(positionId);
                 await redis.hdel(POSITIONS_KEY, positionId);
                 
-                // 🎯 狀態更新：去歷史紀錄裡找出這筆單，把狀態從「監控中」改成「已平倉」
                 const signal = signalHistory.find(s => s.symbol === symbol && s.status === '監控中');
                 if (signal) {
                     signal.status = '已平倉';
@@ -75,7 +74,7 @@ async function monitorPosition(positionId, symbol, originalQty) {
     }, 5000);
 }
 
-// ==================== 自動下單流程 (職業風控 + 延遲進場) ====================
+// ==================== 自動下單流程 ====================
 async function executeOrder(messageText, receiveTime) {
     const coinMatch = messageText.match(/([A-Z0-9]+USDT)/);
     const dirMatch = messageText.match(/方向[：:\s]*(多|空)/);
@@ -190,7 +189,9 @@ async function startBot() {
         const messageText = event.message.message || "";
         const chatId = event.message.chatId?.toString();
         if ((chatId === signalChannel) && messageText.includes("【幣幣篩選】")) {
-            await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
+            // 🛑 系統已暫停：以下這行被註解掉了，所以機器人不會下單！
+            // await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
+            console.log("⏸️ 系統暫停中：收到快訊，但已設定不下單，保護本金中。");
         }
     }, new NewMessage({}));
 }
