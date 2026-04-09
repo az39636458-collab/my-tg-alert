@@ -32,10 +32,13 @@ let signalHistory = [];
 // ==================== 網頁儀表板專用 API ====================
 app.get('/api/history', (req, res) => res.json(signalHistory));
 app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));// 新增：請 MEXC 幫忙抓 K 線的中繼站 (代購)
+// 新增：請 MEXC 幫忙抓 K 線的中繼站 (支援動態時間切換)
 app.get('/api/klines/:symbol', async (req, res) => {
     try {
         const symbol = req.params.symbol;
-        const response = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=15m&limit=100`);
+        // 接收網頁傳來的時間，如果沒傳，預設就給 15m
+        const interval = req.query.interval || '15m'; 
+        const response = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=100`);
         const data = await response.json();
         res.json(data);
     } catch (error) {
