@@ -47,7 +47,7 @@ app.get('/api/klines/:symbol', async (req, res) => {
     }
 });
 
-// ==================== 倉位監控邏輯 ====================
+// ==================== 倉位監控邏輯 (智能判斷盈虧) ====================
 async function monitorPosition(positionId, symbol, originalQty) {
     const interval = setInterval(async () => {
         try {
@@ -56,14 +56,35 @@ async function monitorPosition(positionId, symbol, originalQty) {
 
             const pos = positions?.data?.find(p => p.positionId === positionId);
             if (!pos) {
-                console.log(`✅ ${symbol} 倉位已消失 (已全平止盈或停損)`);
+                console.log(`✅ ${symbol} 倉位已消失，正在判斷是止盈還是止損...`);
                 activePositions.delete(positionId);
                 await redis.hdel(POSITIONS_KEY, positionId);
                 
                 const signal = signalHistory.find(s => s.symbol === symbol && s.status === '監控中');
                 if (signal) {
-                    signal.status = '已平倉';
+                    let finalStatus = '已平倉'; // 預設防呆
+                    try {
+                        // 🎯 偷跑去查現在市價，偵探邏輯啟動！
+                        const res = await fetch(`https://api.mexc.com/api/v3/ticker/price?symbol=${symbol}`);
+                        const data = await res.json();
+                        if (data && data.price) {
+                            const currentPrice = parseFloat(data.price);
+                            const isLong = signal.sideText === '多';
+                            const entry = signal.actualEntryPrice || signal.signalPrice;
+                            
+                            if (isLong) {
+                                finalStatus = currentPrice >= entry ? '已止盈' : '已止損';
+                            } else {
+                                finalStatus = currentPrice <= entry ? '已止盈' : '已止損';
+                            }
+                        }
+                    } catch (e) {
+                        console.log("查價失敗，使用預設已平倉狀態");
+                    }
+
+                    signal.status = finalStatus;
                     await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
+                    console.log(`📝 ${symbol} 狀態已更新為: ${finalStatus}`);
                 }
 
                 clearInterval(interval);
@@ -189,7 +210,7 @@ async function startBot() {
         const messageText = event.message.message || "";
         const chatId = event.message.chatId?.toString();
         if ((chatId === signalChannel) && messageText.includes("【幣幣篩選】")) {
-            // 🛑 系統已暫停：以下這行被註解掉了，所以機器人不會下單！
+            // 🛑 系統已暫停：目前不會自動下單！想重啟時把下面這行的 // 刪掉
             // await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
             console.log("⏸️ 系統暫停中：收到快訊，但已設定不下單，保護本金中。");
         }
