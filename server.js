@@ -31,7 +31,18 @@ let signalHistory = [];
 
 // ==================== 網頁儀表板專用 API ====================
 app.get('/api/history', (req, res) => res.json(signalHistory));
-app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));
+app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));// 新增：請 MEXC 幫忙抓 K 線的中繼站 (代購)
+app.get('/api/klines/:symbol', async (req, res) => {
+    try {
+        const symbol = req.params.symbol;
+        const response = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=15m&limit=100`);
+        const data = await response.json();
+        res.json(data);
+    } catch (error) {
+        console.error("抓取 K 線失敗", error);
+        res.status(500).json({ error: "Fetch failed" });
+    }
+});
 
 // ==================== 倉位監控邏輯 (打到 TP1 即全平) ====================
 async function monitorPosition(positionId, symbol, originalQty) {
