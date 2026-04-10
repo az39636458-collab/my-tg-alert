@@ -35,12 +35,27 @@ let signalHistory = [];
 app.get('/api/history', (req, res) => res.json(signalHistory));
 app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));
 
+// 智能多節點 K 線代購通道 (MEXC -> 幣安合約 -> 幣安現貨)
 app.get('/api/klines/:symbol', async (req, res) => {
     try {
         const symbol = req.params.symbol;
         const interval = req.query.interval || '15m'; 
-        const response = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=100`);
-        const data = await response.json();
+        
+        let response = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=100`);
+        let data = await response.json();
+        
+        if (!Array.isArray(data)) {
+            console.log(`⚠️ MEXC 找不到 ${symbol}，自動切換至幣安合約 API...`);
+            let binanceInterval = interval === '60m' ? '1h' : interval;
+            response = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${binanceInterval}&limit=100`);
+            data = await response.json();
+            
+            if (!Array.isArray(data)) {
+                console.log(`⚠️ 幣安合約也找不到 ${symbol}，切換至幣安現貨 API...`);
+                response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${binanceInterval}&limit=100`);
+                data = await response.json();
+            }
+        }
         res.json(data);
     } catch (error) {
         console.error("抓取 K 線失敗", error);
@@ -86,24 +101,22 @@ async function monitorPosition(positionId, symbol, originalQty) {
     }, 5000);
 }
 
-// 🎯 升級版：虛擬模擬盤監控引擎 (改用 K 線最高/最低價，與圖表 100% 同步)
+// 🎯 虛擬模擬盤監控引擎 (改用 K 線最高/最低價，與圖表 100% 同步)
 setInterval(async () => {
     const virtualSignals = signalHistory.filter(s => s.status === '虛擬監控中');
     if (virtualSignals.length === 0) return;
 
     for (const signal of virtualSignals) {
         try {
-            // 直接去抓 1 分鐘 K 線資料，確保判斷標準跟你的圖表一模一樣！
             const res = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${signal.symbol}&interval=1m&limit=1`);
             const klines = await res.json();
             if (Array.isArray(klines) && klines.length > 0) {
                 const lastK = klines[klines.length - 1];
-                const high = parseFloat(lastK[2]); // 抓出這根 K 線的最高點
-                const low = parseFloat(lastK[3]);  // 抓出這根 K 線的最低點
+                const high = parseFloat(lastK[2]); 
+                const low = parseFloat(lastK[3]);  
 
                 const isLong = signal.sideText === '多';
                 
-                // 用最高/最低點來判斷，絕對不會再有「沒打到線卻觸發」的幽靈事件
                 if (isLong) {
                     if (high >= signal.tp1Price) signal.status = '✅虛擬止盈';
                     else if (low <= signal.stopLoss) signal.status = '❌虛擬止損';
@@ -131,6 +144,12 @@ async function executeOrder(messageText, receiveTime) {
     const stopLossMatch = messageText.match(/建議停損[：:]([\d\.]+)/);
     const takeProfit1Match = messageText.match(/建議停利一[：:]([\d\.]+)/);
     
+    // ⚠️ 這裡就是被我不小心刪掉的 TP2、TP3 情報擷取代碼！已經補回來了！
+    const triggerMatch = messageText.match(/觸發次數[：:]([\d]+)/);
+    const takeProfit2Match = messageText.match(/建議停利二[：:]([\d\.]+)/);
+    const takeProfit3Match = messageText.match(/建議停利三[：:]([\d\.]+)/);
+    const keyPriceMatch = messageText.match(/關鍵價格[：:](.+)/);
+
     if (!coinMatch || !dirMatch || !entryPriceMatch || !stopLossMatch || !takeProfit1Match) return;
 
     const symbol = coinMatch[1];
@@ -140,9 +159,14 @@ async function executeOrder(messageText, receiveTime) {
     const stopLoss = parseFloat(stopLossMatch[1]);
     const tp1Price = parseFloat(takeProfit1Match[1]);
 
+    const triggerCount = triggerMatch ? triggerMatch[1] : "-";
+    const tp2Price = takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null;
+    const tp3Price = takeProfit3Match ? parseFloat(takeProfit3Match[1]) : null;
+    const keyPrices = keyPriceMatch ? keyPriceMatch[1].trim() : "-";
+
     const newSignal = { 
         symbol, sideText, signalPrice, stopLoss, tp1Price, 
-        tp2Price: null, tp3Price: null, triggerCount: "-", keyPrices: "-", 
+        tp2Price, tp3Price, triggerCount, keyPrices, 
         actualEntryPrice: null, 
         time: receiveTime, status: '等待開盤' 
     };
@@ -152,17 +176,15 @@ async function executeOrder(messageText, receiveTime) {
     await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
 
     const now = new Date();
-    // 計算距離下一分鐘（換線）還有幾秒
     const msToNextMinute = 60000 - (now.getSeconds() * 1000) - now.getMilliseconds();
 
-    // 🛑 修正版模擬盤邏輯：乖乖等到換線，才把狀態切成「虛擬監控中」！
     if (IS_PAUSED) {
         console.log(`⏳ ${symbol} 模擬盤：將於 ${Math.floor(msToNextMinute/1000)} 秒後(換線時)進入虛擬監控...`);
         setTimeout(async () => {
             const s = signalHistory.find(x => x.time === receiveTime && x.symbol === symbol);
             if (s && s.status === '等待開盤') {
                 s.status = '虛擬監控中';
-                s.actualEntryPrice = signalPrice; // 假裝以快訊價進場
+                s.actualEntryPrice = signalPrice; 
                 await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
                 console.log(`⏸️ ${symbol} 模擬盤：已正式進入虛擬監控，等待觸發目標價！`);
             }
