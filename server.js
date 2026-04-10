@@ -11,7 +11,7 @@ app.use(cors());
 
 // ==================== 基本配置 ====================
 // 🛑 【模擬盤總開關】：true = 虛擬監控不花錢；false = 真金白銀自動下單
-const IS_PAUSED = true; 
+const IS_PAUSED = false; 
 
 const apiId = 31121887;
 const apiHash = "6ce79e991f0849d80969c6ceae8e3be0";
