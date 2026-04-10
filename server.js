@@ -10,8 +10,8 @@ const app = express();
 app.use(cors());
 
 // ==================== 基本配置 ====================
-// 🛑 【重要開關】：設為 true = 只會記錄到網頁但不會買幣；設為 false = 恢復自動下單賺錢！
-const IS_PAUSED = false; 
+// 🛑 【模擬盤總開關】：true = 虛擬監控不花錢；false = 真金白銀自動下單
+const IS_PAUSED = true; 
 
 const apiId = 31121887;
 const apiHash = "6ce79e991f0849d80969c6ceae8e3be0";
@@ -48,6 +48,7 @@ app.get('/api/klines/:symbol', async (req, res) => {
     }
 });
 
+// 🚀 真實倉位監控 (當 IS_PAUSED = false 時運作)
 async function monitorPosition(positionId, symbol, originalQty) {
     const interval = setInterval(async () => {
         try {
@@ -85,6 +86,44 @@ async function monitorPosition(positionId, symbol, originalQty) {
     }, 5000);
 }
 
+// 🎯 升級版：虛擬模擬盤監控引擎 (改用 K 線最高/最低價，與圖表 100% 同步)
+setInterval(async () => {
+    const virtualSignals = signalHistory.filter(s => s.status === '虛擬監控中');
+    if (virtualSignals.length === 0) return;
+
+    for (const signal of virtualSignals) {
+        try {
+            // 直接去抓 1 分鐘 K 線資料，確保判斷標準跟你的圖表一模一樣！
+            const res = await fetch(`https://api.mexc.com/api/v3/klines?symbol=${signal.symbol}&interval=1m&limit=1`);
+            const klines = await res.json();
+            if (Array.isArray(klines) && klines.length > 0) {
+                const lastK = klines[klines.length - 1];
+                const high = parseFloat(lastK[2]); // 抓出這根 K 線的最高點
+                const low = parseFloat(lastK[3]);  // 抓出這根 K 線的最低點
+
+                const isLong = signal.sideText === '多';
+                
+                // 用最高/最低點來判斷，絕對不會再有「沒打到線卻觸發」的幽靈事件
+                if (isLong) {
+                    if (high >= signal.tp1Price) signal.status = '✅虛擬止盈';
+                    else if (low <= signal.stopLoss) signal.status = '❌虛擬止損';
+                } else {
+                    if (low <= signal.tp1Price) signal.status = '✅虛擬止盈';
+                    else if (high >= signal.stopLoss) signal.status = '❌虛擬止損';
+                }
+
+                if (signal.status !== '虛擬監控中') {
+                    await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
+                    console.log(`📊 模擬盤結算: ${signal.symbol} 觸發 ${signal.status}`);
+                }
+            }
+        } catch (err) { /* 忽略網路偶發錯誤 */ }
+        
+        await new Promise(r => setTimeout(r, 1000));
+    }
+}, 10000); 
+
+// ==================== 自動下單流程 ====================
 async function executeOrder(messageText, receiveTime) {
     const coinMatch = messageText.match(/([A-Z0-9]+USDT)/);
     const dirMatch = messageText.match(/方向[：:\s]*(多|空)/);
@@ -92,11 +131,6 @@ async function executeOrder(messageText, receiveTime) {
     const stopLossMatch = messageText.match(/建議停損[：:]([\d\.]+)/);
     const takeProfit1Match = messageText.match(/建議停利一[：:]([\d\.]+)/);
     
-    const triggerMatch = messageText.match(/觸發次數[：:]([\d]+)/);
-    const takeProfit2Match = messageText.match(/建議停利二[：:]([\d\.]+)/);
-    const takeProfit3Match = messageText.match(/建議停利三[：:]([\d\.]+)/);
-    const keyPriceMatch = messageText.match(/關鍵價格[：:](.+)/);
-
     if (!coinMatch || !dirMatch || !entryPriceMatch || !stopLossMatch || !takeProfit1Match) return;
 
     const symbol = coinMatch[1];
@@ -106,28 +140,34 @@ async function executeOrder(messageText, receiveTime) {
     const stopLoss = parseFloat(stopLossMatch[1]);
     const tp1Price = parseFloat(takeProfit1Match[1]);
 
-    const triggerCount = triggerMatch ? triggerMatch[1] : "-";
-    const tp2Price = takeProfit2Match ? parseFloat(takeProfit2Match[1]) : null;
-    const tp3Price = takeProfit3Match ? parseFloat(takeProfit3Match[1]) : null;
-    const keyPrices = keyPriceMatch ? keyPriceMatch[1].trim() : "-";
-
     const newSignal = { 
         symbol, sideText, signalPrice, stopLoss, tp1Price, 
-        tp2Price, tp3Price, triggerCount, keyPrices, 
+        tp2Price: null, tp3Price: null, triggerCount: "-", keyPrices: "-", 
         actualEntryPrice: null, 
         time: receiveTime, status: '等待開盤' 
     };
     
-    // 1. 這裡一定會把快訊存進戰情室的歷史紀錄裡！
     signalHistory.unshift(newSignal);
     if (signalHistory.length > 50) signalHistory.pop();
     await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
 
-    // 🛑 2. 如果暫停開關打開了，就在這裡踩煞車！
+    const now = new Date();
+    // 計算距離下一分鐘（換線）還有幾秒
+    const msToNextMinute = 60000 - (now.getSeconds() * 1000) - now.getMilliseconds();
+
+    // 🛑 修正版模擬盤邏輯：乖乖等到換線，才把狀態切成「虛擬監控中」！
     if (IS_PAUSED) {
-        newSignal.status = '略過(暫停下單)';
-        await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
-        return console.log(`⏸️ 系統保護中：已將 ${symbol} 記錄到網頁，但不執行下單。`);
+        console.log(`⏳ ${symbol} 模擬盤：將於 ${Math.floor(msToNextMinute/1000)} 秒後(換線時)進入虛擬監控...`);
+        setTimeout(async () => {
+            const s = signalHistory.find(x => x.time === receiveTime && x.symbol === symbol);
+            if (s && s.status === '等待開盤') {
+                s.status = '虛擬監控中';
+                s.actualEntryPrice = signalPrice; // 假裝以快訊價進場
+                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
+                console.log(`⏸️ ${symbol} 模擬盤：已正式進入虛擬監控，等待觸發目標價！`);
+            }
+        }, msToNextMinute);
+        return;
     }
 
     if ([...activePositions.values()].some(p => p.symbol === symbol && p.side === side)) {
@@ -136,8 +176,6 @@ async function executeOrder(messageText, receiveTime) {
         return console.log(`⏭️ ${symbol} 已有倉位，略過。`);
     }
 
-    const now = new Date();
-    const msToNextMinute = 60000 - (now.getSeconds() * 1000) - now.getMilliseconds();
     console.log(`⏳ ${symbol} 訊號已確認，${Math.floor(msToNextMinute/1000)} 秒後於下一根 1m 開盤進場...`);
 
     setTimeout(async () => {
@@ -149,15 +187,13 @@ async function executeOrder(messageText, receiveTime) {
 
             if (totalQty <= 0) {
                 newSignal.status = '數量為0略過';
-                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); 
-                return console.log("⚠️ 價格過高或計算數量為0，略過");
+                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); return;
             }
             
             const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
             if (orderRes.code !== 0) {
                 newSignal.status = '下單失敗';
-                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); 
-                return console.error(`❌ 下單失敗:`, orderRes.msg);
+                await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); return;
             }
 
             await new Promise(r => setTimeout(r, 2000));
@@ -199,7 +235,6 @@ async function startBot() {
         const messageText = event.message.message || "";
         const chatId = event.message.chatId?.toString();
         if ((chatId === signalChannel) && messageText.includes("【幣幣篩選】")) {
-            // 🟢 注意：這裡已經把之前的 // 拿掉了，讓流程能跑進去被「記錄」！
             await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
         }
     }, new NewMessage({}));
