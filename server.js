@@ -10,6 +10,9 @@ const app = express();
 app.use(cors());
 
 // ==================== 基本配置 ====================
+// 🛑 【重要開關】：設為 true = 只會記錄到網頁但不會買幣；設為 false = 恢復自動下單賺錢！
+const IS_PAUSED = true; 
+
 const apiId = 31121887;
 const apiHash = "6ce79e991f0849d80969c6ceae8e3be0";
 const signalChannel = "-1003749280511";
@@ -29,11 +32,9 @@ const bitunix = new Bitunix({
 const activePositions = new Map();
 let signalHistory = []; 
 
-// ==================== 網頁儀表板專用 API ====================
 app.get('/api/history', (req, res) => res.json(signalHistory));
 app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));
 
-// 請 MEXC 幫忙抓 K 線的中繼站
 app.get('/api/klines/:symbol', async (req, res) => {
     try {
         const symbol = req.params.symbol;
@@ -47,7 +48,6 @@ app.get('/api/klines/:symbol', async (req, res) => {
     }
 });
 
-// ==================== 倉位監控邏輯 (智能判斷盈虧) ====================
 async function monitorPosition(positionId, symbol, originalQty) {
     const interval = setInterval(async () => {
         try {
@@ -62,40 +62,29 @@ async function monitorPosition(positionId, symbol, originalQty) {
                 
                 const signal = signalHistory.find(s => s.symbol === symbol && s.status === '監控中');
                 if (signal) {
-                    let finalStatus = '已平倉'; // 預設防呆
+                    let finalStatus = '已平倉'; 
                     try {
-                        // 🎯 偷跑去查現在市價，偵探邏輯啟動！
                         const res = await fetch(`https://api.mexc.com/api/v3/ticker/price?symbol=${symbol}`);
                         const data = await res.json();
                         if (data && data.price) {
                             const currentPrice = parseFloat(data.price);
                             const isLong = signal.sideText === '多';
                             const entry = signal.actualEntryPrice || signal.signalPrice;
-                            
-                            if (isLong) {
-                                finalStatus = currentPrice >= entry ? '已止盈' : '已止損';
-                            } else {
-                                finalStatus = currentPrice <= entry ? '已止盈' : '已止損';
-                            }
+                            if (isLong) finalStatus = currentPrice >= entry ? '已止盈' : '已止損';
+                            else finalStatus = currentPrice <= entry ? '已止盈' : '已止損';
                         }
-                    } catch (e) {
-                        console.log("查價失敗，使用預設已平倉狀態");
-                    }
+                    } catch (e) { console.log("查價失敗，使用預設狀態"); }
 
                     signal.status = finalStatus;
                     await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
-                    console.log(`📝 ${symbol} 狀態已更新為: ${finalStatus}`);
                 }
-
                 clearInterval(interval);
                 return;
             }
-            console.log(`🔍 ${symbol} 監控中: 數量=${pos.qty}/${originalQty}`);
         } catch (err) { console.error(`❌ 監控異常:`, err.message); }
     }, 5000);
 }
 
-// ==================== 自動下單流程 ====================
 async function executeOrder(messageText, receiveTime) {
     const coinMatch = messageText.match(/([A-Z0-9]+USDT)/);
     const dirMatch = messageText.match(/方向[：:\s]*(多|空)/);
@@ -129,9 +118,17 @@ async function executeOrder(messageText, receiveTime) {
         time: receiveTime, status: '等待開盤' 
     };
     
+    // 1. 這裡一定會把快訊存進戰情室的歷史紀錄裡！
     signalHistory.unshift(newSignal);
     if (signalHistory.length > 50) signalHistory.pop();
     await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
+
+    // 🛑 2. 如果暫停開關打開了，就在這裡踩煞車！
+    if (IS_PAUSED) {
+        newSignal.status = '略過(暫停下單)';
+        await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
+        return console.log(`⏸️ 系統保護中：已將 ${symbol} 記錄到網頁，但不執行下單。`);
+    }
 
     if ([...activePositions.values()].some(p => p.symbol === symbol && p.side === side)) {
         newSignal.status = '略過(已有單)';
@@ -145,20 +142,16 @@ async function executeOrder(messageText, receiveTime) {
 
     setTimeout(async () => {
         try {
-            const currentEntryPrice = signalPrice;
-            const slPercent = Math.abs((stopLoss - currentEntryPrice) / currentEntryPrice);
+            const slPercent = Math.abs((stopLoss - signalPrice) / signalPrice);
             let targetValue = 5 / slPercent;
             if (targetValue > 200) targetValue = 200;
-
-            const totalQty = Math.floor(targetValue / currentEntryPrice);
+            const totalQty = Math.floor(targetValue / signalPrice);
 
             if (totalQty <= 0) {
                 newSignal.status = '數量為0略過';
                 await redis.set(HISTORY_KEY, JSON.stringify(signalHistory)); 
                 return console.log("⚠️ 價格過高或計算數量為0，略過");
             }
-
-            console.log(`🚀 1m 開盤進場！${symbol} | 停損距離: ${(slPercent*100).toFixed(2)}% | 預計虧損: 5U`);
             
             const orderRes = await bitunix.placeMarketOrder(symbol, side, totalQty);
             if (orderRes.code !== 0) {
@@ -173,25 +166,21 @@ async function executeOrder(messageText, receiveTime) {
             if (!pos) return;
 
             const actualEntry = parseFloat(pos.avgOpenPrice);
-
             const posData = { symbol, side, entryPrice: actualEntry, totalQty, tp1Price, stopLoss, time: new Date().toLocaleString() };
+            
             activePositions.set(pos.positionId, posData);
             await redis.hset(POSITIONS_KEY, pos.positionId, JSON.stringify(posData));
-
             await bitunix.placeTpSl(symbol, pos.positionId, tp1Price, totalQty, stopLoss, totalQty);
             monitorPosition(pos.positionId, symbol, totalQty);
             
             newSignal.actualEntryPrice = actualEntry;
             newSignal.status = '監控中';
             await redis.set(HISTORY_KEY, JSON.stringify(signalHistory));
-            
             console.log(`✅ ${symbol} 執行成功！實際進場均價: ${actualEntry}`);
-
         } catch (err) { console.error('❌ 執行出錯:', err.message); }
     }, msToNextMinute);
 }
 
-// ==================== 啟動 ====================
 async function startBot() {
     const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, { connectionRetries: 5 });
     await client.connect();
@@ -210,9 +199,8 @@ async function startBot() {
         const messageText = event.message.message || "";
         const chatId = event.message.chatId?.toString();
         if ((chatId === signalChannel) && messageText.includes("【幣幣篩選】")) {
-            // 🛑 系統已暫停：目前不會自動下單！想重啟時把下面這行的 // 刪掉
-            // await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
-            console.log("⏸️ 系統暫停中：收到快訊，但已設定不下單，保護本金中。");
+            // 🟢 注意：這裡已經把之前的 // 拿掉了，讓流程能跑進去被「記錄」！
+            await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
         }
     }, new NewMessage({}));
 }
