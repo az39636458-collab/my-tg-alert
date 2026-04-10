@@ -11,7 +11,7 @@ app.use(cors());
 
 // ==================== 基本配置 ====================
 // 🛑 【重要開關】：設為 true = 只會記錄到網頁但不會買幣；設為 false = 恢復自動下單賺錢！
-const IS_PAUSED = true; 
+const IS_PAUSED = false; 
 
 const apiId = 31121887;
 const apiHash = "6ce79e991f0849d80969c6ceae8e3be0";
