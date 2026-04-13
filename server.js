@@ -17,7 +17,7 @@ const sessionString = "1BQANOTEuMTA4LjU2LjEyOQG7ujm2g/sSrgws1fBfTt7BHOyn3x5y8XPC
 
 const POSITIONS_KEY = 'active_trading_positions';
 const HISTORY_KEY = 'signal_history';
-const HISTORY_14399_KEY = 'history_14399';
+const HISTORY_14399_KEY = 'history_14399'; 
 
 const redis = new Redis(process.env.REDIS_URL);
 redis.on('connect', () => console.log('✅ Redis 已連線'));
@@ -30,7 +30,9 @@ let history14399 = [];
 
 // ==================== API 通道 ====================
 app.get('/api/history', (req, res) => res.json(signalHistory));
-app.get('/api/history-14399', (req, res) => res.json(history14399));
+
+// 🎯 關鍵修復：重新把 `/api/messages` 這個門打開，讓你的舊網頁能直接抓到資料！
+app.get('/api/messages', (req, res) => res.json(history14399));
 app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));
 
 app.get('/api/klines/:symbol', async (req, res) => {
@@ -141,16 +143,15 @@ async function executeOrder(messageText, receiveTime) {
 
 // ==================== 核心二：14399 專用 (原汁原味純文字紀錄) ====================
 async function record14399(messageText, receiveTime) {
-    // 🎯 不做任何正則表達式拆解，直接把收到的文字整包存起來！
     const newSignal = { 
         time: receiveTime, 
         text: messageText // 保留完整的原始文字
     };
     
     history14399.unshift(newSignal);
-    if (history14399.length > 150) history14399.pop(); // 維持 150 筆
+    if (history14399.length > 150) history14399.pop(); // 最高保留 150 筆
     await redis.set(HISTORY_14399_KEY, JSON.stringify(history14399));
-    console.log(`📝 已記錄一般快訊 (14399格式)`);
+    console.log(`📝 已記錄 14399 快訊`);
 }
 
 // ==================== 啟動 ====================
@@ -167,6 +168,7 @@ async function startBot() {
     
     const savedH = await redis.get(HISTORY_KEY);
     if (savedH) signalHistory = JSON.parse(savedH);
+    
     const saved14399 = await redis.get(HISTORY_14399_KEY);
     if (saved14399) history14399 = JSON.parse(saved14399);
     
@@ -175,11 +177,12 @@ async function startBot() {
         const chatId = event.message.chatId?.toString();
         
         if (chatId === signalChannel) {
-            // 🛑 分流器：如果是「幣幣篩選」，交給核心一下單
+            // 🛑 智能分流器
             if (messageText.includes("【幣幣篩選】")) {
+                // 是幣幣篩選 -> 交給下單核心
                 await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
             } else {
-                // 🎯 其他所有訊息（包含 14399），全部原汁原味丟給核心二紀錄！
+                // 不是幣幣篩選 -> 全都當作 14399 記錄起來
                 await record14399(messageText, new Date(event.message.date * 1000).toLocaleString());
             }
         }
