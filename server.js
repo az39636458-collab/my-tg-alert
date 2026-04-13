@@ -17,7 +17,7 @@ const sessionString = "1BQANOTEuMTA4LjU2LjEyOQG7ujm2g/sSrgws1fBfTt7BHOyn3x5y8XPC
 
 const POSITIONS_KEY = 'active_trading_positions';
 const HISTORY_KEY = 'signal_history';
-const HISTORY_14399_KEY = 'history_14399'; 
+const HISTORY_14439_KEY = 'history_14439'; 
 
 const redis = new Redis(process.env.REDIS_URL);
 redis.on('connect', () => console.log('✅ Redis 已連線'));
@@ -26,13 +26,11 @@ const bitunix = new Bitunix({ apiKey: process.env.BITUNIX_API_KEY, apiSecret: pr
 
 const activePositions = new Map();
 let signalHistory = []; 
-let history14399 = [];  
+let history14439 = [];  
 
 // ==================== API 通道 ====================
 app.get('/api/history', (req, res) => res.json(signalHistory));
-
-// 🎯 關鍵修復：重新把 `/api/messages` 這個門打開，讓你的舊網頁能直接抓到資料！
-app.get('/api/messages', (req, res) => res.json(history14399));
+app.get('/api/messages', (req, res) => res.json(history14439));
 app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));
 
 app.get('/api/klines/:symbol', async (req, res) => {
@@ -141,17 +139,17 @@ async function executeOrder(messageText, receiveTime) {
     }, msToNextMinute);
 }
 
-// ==================== 核心二：14399 專用 (原汁原味純文字紀錄) ====================
-async function record14399(messageText, receiveTime) {
+// ==================== 核心二：14439 專用 (全網捕捉) ====================
+async function record14439(messageText, receiveTime) {
     const newSignal = { 
         time: receiveTime, 
-        text: messageText // 保留完整的原始文字
+        text: messageText
     };
     
-    history14399.unshift(newSignal);
-    if (history14399.length > 150) history14399.pop(); // 最高保留 150 筆
-    await redis.set(HISTORY_14399_KEY, JSON.stringify(history14399));
-    console.log(`📝 已記錄 14399 快訊`);
+    history14439.unshift(newSignal);
+    if (history14439.length > 150) history14439.pop(); 
+    await redis.set(HISTORY_14439_KEY, JSON.stringify(history14439));
+    console.log(`📝 已記錄 14439 快訊`);
 }
 
 // ==================== 啟動 ====================
@@ -169,22 +167,21 @@ async function startBot() {
     const savedH = await redis.get(HISTORY_KEY);
     if (savedH) signalHistory = JSON.parse(savedH);
     
-    const saved14399 = await redis.get(HISTORY_14399_KEY);
-    if (saved14399) history14399 = JSON.parse(saved14399);
+    const saved14439 = await redis.get(HISTORY_14439_KEY);
+    if (saved14439) history14439 = JSON.parse(saved14439);
     
     client.addEventHandler(async (event) => {
         const messageText = event.message.message || "";
         const chatId = event.message.chatId?.toString();
         
-        if (chatId === signalChannel) {
-            // 🛑 智能分流器
-            if (messageText.includes("【幣幣篩選】")) {
-                // 是幣幣篩選 -> 交給下單核心
-                await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
-            } else {
-                // 不是幣幣篩選 -> 全都當作 14399 記錄起來
-                await record14399(messageText, new Date(event.message.date * 1000).toLocaleString());
-            }
+        // 🎯 關鍵修改：拆掉大門，實施雙軌判斷！
+        if (chatId === signalChannel && messageText.includes("【幣幣篩選】")) {
+            // 是幣幣篩選，而且確定來自專屬群組 -> 交給下單核心
+            await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
+        } 
+        else if (messageText.includes("14439") || (messageText.includes("USDT") && (messageText.includes("多") || messageText.includes("空")))) {
+            // 不管在哪個群組！只要文字裡面有 14439，或者是標準的報單，通通抓進來！
+            await record14439(messageText, new Date(event.message.date * 1000).toLocaleString());
         }
     }, new NewMessage({}));
 }
