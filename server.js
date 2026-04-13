@@ -139,7 +139,7 @@ async function executeOrder(messageText, receiveTime) {
     }, msToNextMinute);
 }
 
-// ==================== 核心二：14439 專用 (全網捕捉) ====================
+// ==================== 核心二：14439 專用 (精準捕捉) ====================
 async function record14439(messageText, receiveTime) {
     const newSignal = { 
         time: receiveTime, 
@@ -149,7 +149,7 @@ async function record14439(messageText, receiveTime) {
     history14439.unshift(newSignal);
     if (history14439.length > 150) history14439.pop(); 
     await redis.set(HISTORY_14439_KEY, JSON.stringify(history14439));
-    console.log(`📝 已記錄 14439 快訊`);
+    console.log(`📝 已記錄極短線波動快訊`);
 }
 
 // ==================== 啟動 ====================
@@ -174,13 +174,11 @@ async function startBot() {
         const messageText = event.message.message || "";
         const chatId = event.message.chatId?.toString();
         
-        // 🎯 關鍵修改：拆掉大門，實施雙軌判斷！
         if (chatId === signalChannel && messageText.includes("【幣幣篩選】")) {
-            // 是幣幣篩選，而且確定來自專屬群組 -> 交給下單核心
             await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
         } 
-        else if (messageText.includes("14439") || (messageText.includes("USDT") && (messageText.includes("多") || messageText.includes("空")))) {
-            // 不管在哪個群組！只要文字裡面有 14439，或者是標準的報單，通通抓進來！
+        // 🎯 關鍵修改：只要內文有 USDT，而且出現「波動」、「漲幅」、「跌幅」或是「Signal」，通通當作 14439 抓起來！
+        else if (messageText.includes("USDT") && (messageText.includes("波動") || messageText.includes("漲幅") || messageText.includes("跌幅") || messageText.includes("Signal"))) {
             await record14439(messageText, new Date(event.message.date * 1000).toLocaleString());
         }
     }, new NewMessage({}));
