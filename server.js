@@ -9,7 +9,6 @@ const Redis = require('ioredis');
 const app = express();
 app.use(cors());
 
-// ==================== 基本配置 ====================
 const apiId = 31121887;
 const apiHash = "6ce79e991f0849d80969c6ceae8e3be0";
 const signalChannel = "-1003749280511";
@@ -20,7 +19,7 @@ const HISTORY_KEY = 'signal_history';
 const HISTORY_14439_KEY = 'history_14439'; 
 
 const redis = new Redis(process.env.REDIS_URL);
-redis.on('connect', () => console.log('✅ Redis 已連線'));
+redis.on('connect', () => console.log('Redis 已連線'));
 
 const bitunix = new Bitunix({ apiKey: process.env.BITUNIX_API_KEY, apiSecret: process.env.BITUNIX_API_SECRET });
 
@@ -28,7 +27,6 @@ const activePositions = new Map();
 let signalHistory = []; 
 let history14439 = [];  
 
-// ==================== API 通道 ====================
 app.get('/api/history', (req, res) => res.json(signalHistory));
 app.get('/api/messages', (req, res) => res.json(history14439));
 app.get('/api/active', (req, res) => res.json(Array.from(activePositions.values())));
@@ -52,7 +50,6 @@ app.get('/api/klines/:symbol', async (req, res) => {
     } catch (error) { res.status(500).json({ error: "Fetch failed" }); }
 });
 
-// ==================== 核心一：幣幣篩選專用 ====================
 async function monitorPosition(positionId, symbol, originalQty) {
     const interval = setInterval(async () => {
         try {
@@ -139,7 +136,6 @@ async function executeOrder(messageText, receiveTime) {
     }, msToNextMinute);
 }
 
-// ==================== 核心二：14439 專用 (精準捕捉) ====================
 async function record14439(messageText, receiveTime) {
     const newSignal = { 
         time: receiveTime, 
@@ -147,12 +143,11 @@ async function record14439(messageText, receiveTime) {
     };
     
     history14439.unshift(newSignal);
-    if (history14439.length > 150) history14439.pop(); 
+    if (history14439.length > 200) history14439.pop(); 
     await redis.set(HISTORY_14439_KEY, JSON.stringify(history14439));
-    console.log(`📝 已記錄極短線波動快訊`);
+    console.log(`已記錄極短線波動快訊`);
 }
 
-// ==================== 啟動 ====================
 async function startBot() {
     const client = new TelegramClient(new StringSession(sessionString), apiId, apiHash, { connectionRetries: 5 });
     await client.connect();
@@ -177,7 +172,6 @@ async function startBot() {
         if (chatId === signalChannel && messageText.includes("【幣幣篩選】")) {
             await executeOrder(messageText, new Date(event.message.date * 1000).toLocaleString());
         } 
-        // 🎯 關鍵修改：只要內文有 USDT，而且出現「波動」、「漲幅」、「跌幅」或是「Signal」，通通當作 14439 抓起來！
         else if (messageText.includes("USDT") && (messageText.includes("波動") || messageText.includes("漲幅") || messageText.includes("跌幅") || messageText.includes("Signal"))) {
             await record14439(messageText, new Date(event.message.date * 1000).toLocaleString());
         }
